@@ -28,6 +28,7 @@ jobs:
             flutter create --platforms=android --org com.gaifd --project-name m365_dashboard .
           fi
           python3 tool/patch_android.py
+          cat android/build.gradle.kts
 
       - name: Free disk space and preinstall NDK
         run: |

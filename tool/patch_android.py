@@ -25,3 +25,29 @@ if "BLUETOOTH_SCAN" not in text:
 text = re.sub(r'android:label="[^"]*"', 'android:label="M365 Dashboard"', text, count=1)
 manifest.write_text(text, encoding="utf-8")
 print("AndroidManifest patched")
+
+# Старые плагины (flutter_blue_plus) компилируются под android-33, а свежие androidx
+# требуют 34+. Поднимаем compileSdk у всех библиотек-плагинов.
+root_gradle = pathlib.Path("android/build.gradle.kts")
+g = root_gradle.read_text(encoding="utf-8")
+marker = "// m365: force plugin compileSdk"
+if marker not in g:
+    snippet = f'''
+{marker}
+subprojects {{
+    afterEvaluate {{
+        if (plugins.hasPlugin("com.android.library")) {{
+            extensions.findByName("android")?.withGroovyBuilder {{
+                "compileSdkVersion"(36)
+            }}
+        }}
+    }}
+}}
+'''
+    idx = g.find("subprojects {\n    project.evaluationDependsOn")
+    if idx < 0:
+        idx = g.find("project.evaluationDependsOn")
+        idx = g.rfind("subprojects", 0, idx) if idx >= 0 else -1
+    g = (g[:idx] + snippet.lstrip("\n") + "\n" + g[idx:]) if idx >= 0 else (g + snippet)
+    root_gradle.write_text(g, encoding="utf-8")
+    print("build.gradle.kts patched")
