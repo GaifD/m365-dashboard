@@ -65,7 +65,8 @@ jobs:
       - name: Build APK
         run: |
           set -o pipefail
-          flutter build apk --release 2>&1 | tee build.log
+          flutter test test/miauth_test.dart 2>&1 | tee build.log
+          flutter build apk --release 2>&1 | tee -a build.log
 
       - name: Report build errors
         if: failure()

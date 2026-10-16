@@ -9,9 +9,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../logic/energy.dart';
+import 'miauth.dart';
+import 'micrypto.dart';
 import 'protocol.dart';
 
 enum LinkState { idle, scanning, connecting, connected }
+
+/// Состояние шифрования/авторизации.
+enum AuthState { unknown, plain, loggingIn, ready, needRegister, registering, failed }
 
 class LogLine {
   final DateTime t;
@@ -28,21 +33,33 @@ class LogLine {
 }
 
 class ScooterService extends ChangeNotifier {
-  ScooterService._();
+  ScooterService._() {
+    _parser.decryptor = (frame) {
+      final k = _keys;
+      if (k == null) return null;
+      return MiCrypto.decryptUart(k.devKey, k.devIv, frame);
+    };
+    _parser.onError = (e) => _log('**', e);
+  }
   static final ScooterService instance = ScooterService._();
 
-  static final Guid _uartService = Guid('6e400001-b5a3-f393-e0a9-e50e24dcca9e');
-  static final Guid _txUuid = Guid('6e400002-b5a3-f393-e0a9-e50e24dcca9e');
-  static final Guid _rxUuid = Guid('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
+  static const String _uartService = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  static const String _txUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+  static const String _rxUuid = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+  static const String _authService = '0000fe95-0000-1000-8000-00805f9b34fb';
+  static const String _upnpUuid = '00000010-0000-1000-8000-00805f9b34fb';
+  static const String _avdtpUuid = '00000019-0000-1000-8000-00805f9b34fb';
 
   static const int factoryMahDefault = 12800; // M365 Pro, родная батарея
 
   // ---- состояние связи ----
   LinkState link = LinkState.idle;
+  AuthState auth = AuthState.unknown;
+  String? authStatus;
   String? deviceName;
   String? statusText;
   List<ScanResult> scanResults = [];
-  bool noReply = false; // подключились, но самокат молчит — возможно, нужна авторизация
+  bool noReply = false;
 
   // ---- контроллер ----
   double speed = 0; // км/ч
@@ -73,7 +90,7 @@ class ScooterService extends ChangeNotifier {
 
   // ---- расчёты ----
   final TripTracker trip = TripTracker();
-  double savedAvgWhKm = 13.0; // средний расход прошлых поездок, для прогноза в начале
+  double savedAvgWhKm = 13.0;
   int _currentSign = 1;
   int _signVotes = 0;
 
@@ -98,9 +115,11 @@ class ScooterService extends ChangeNotifier {
     return v.last - v.first;
   }
 
+  bool get dataFlowing => link == LinkState.connected && (auth == AuthState.plain || auth == AuthState.ready);
+
   // ---- журнал ----
   final List<LogLine> log = [];
-  static const int _logMax = 800;
+  static const int _logMax = 1200;
   void _log(String dir, String text) {
     log.add(LogLine(dir, text));
     if (log.length > _logMax) log.removeRange(0, log.length - _logMax);
@@ -114,14 +133,21 @@ class ScooterService extends ChangeNotifier {
   // ---- BLE ----
   BluetoothDevice? _device;
   BluetoothCharacteristic? _tx;
+  BluetoothCharacteristic? _upnp;
+  BluetoothCharacteristic? _avdtp;
+  final List<StreamSubscription> _subs = [];
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
-  StreamSubscription<List<int>>? _rxSub;
-  Timer? _poll;
-  int _pollStep = 0;
-  final List<Uint8List> _oneShot = [];
   final FrameParser _parser = FrameParser();
   bool _userDisconnect = false;
+  bool _quietReconnect = false; // переподключение внутри привязки — без автологики
+  MiAuth? _miAuth;
+  MiKeys? _keys;
+  int _uartIt = 0;
+  int _pollGen = 0;
+  int _pollStep = 0;
+  final List<Uint8List> _oneShot = [];
+  Completer<void>? _pending;
 
   Future<void> init() async {
     final p = await SharedPreferences.getInstance();
@@ -129,7 +155,6 @@ class ScooterService extends ChangeNotifier {
     final last = p.getString('lastDevice');
     final lastName = p.getString('lastDeviceName');
     if (last != null) {
-      // Пробуем сразу подключиться к прошлому самокату.
       unawaited(connect(BluetoothDevice.fromId(last), name: lastName));
     }
   }
@@ -193,11 +218,73 @@ class ScooterService extends ChangeNotifier {
 
   static String _nameOf(ScanResult r) =>
       r.advertisementData.advName.isNotEmpty ? r.advertisementData.advName : r.device.platformName;
-
   static bool _isScooter(ScanResult r) => _nameOf(r).toLowerCase().contains('scooter');
-
   static String nameOf(ScanResult r) => _nameOf(r);
   static bool isScooter(ScanResult r) => _isScooter(r);
+
+  static String _u(Guid g) => g.str128.toLowerCase();
+
+  /// Подключение и настройка характеристик. Без авторизации и опроса.
+  Future<bool> _open(BluetoothDevice d) async {
+    await _connSub?.cancel();
+    _connSub = d.connectionState.listen((s) {
+      if (s == BluetoothConnectionState.disconnected && link == LinkState.connected) {
+        _onDisconnected();
+      }
+    });
+    await d.connect(timeout: const Duration(seconds: 15), autoConnect: false);
+    final services = await d.discoverServices();
+    BluetoothCharacteristic? rx;
+    _tx = null;
+    _upnp = null;
+    _avdtp = null;
+    for (final s in services) {
+      final su = _u(s.serviceUuid);
+      _log('**', 'service ${s.serviceUuid.str}: ${s.characteristics.map((c) => c.characteristicUuid.str).join(', ')}');
+      for (final c in s.characteristics) {
+        final cu = _u(c.characteristicUuid);
+        if (su == _uartService && cu == _txUuid) _tx = c;
+        if (su == _uartService && cu == _rxUuid) rx = c;
+        if (su == _authService && cu == _upnpUuid) _upnp = c;
+        if (su == _authService && cu == _avdtpUuid) _avdtp = c;
+      }
+    }
+    if (_tx == null || rx == null) throw StateError('UART-сервис не найден');
+
+    for (final s in _subs) {
+      await s.cancel();
+    }
+    _subs.clear();
+    _parser.reset();
+
+    await rx.setNotifyValue(true);
+    final rxSub = rx.onValueReceived.listen(_onData);
+    d.cancelWhenDisconnected(rxSub);
+    _subs.add(rxSub);
+
+    final upnp = _upnp;
+    final avdtp = _avdtp;
+    if (upnp != null && avdtp != null) {
+      _miAuth = MiAuth(
+        writeUpnp: (data) => _write(upnp, data),
+        writeAvdtp: (data) => _write(avdtp, data),
+        log: (m) => _log('**', m),
+      );
+      await upnp.setNotifyValue(true);
+      await avdtp.setNotifyValue(true);
+      final a = upnp.onValueReceived.listen((v) => _miAuth?.onNotify(v));
+      final b = avdtp.onValueReceived.listen((v) => _miAuth?.onNotify(v));
+      d.cancelWhenDisconnected(a);
+      d.cancelWhenDisconnected(b);
+      _subs..add(a)..add(b);
+    } else {
+      _miAuth = null;
+    }
+    return true;
+  }
+
+  Future<void> _write(BluetoothCharacteristic c, List<int> data) =>
+      c.write(data, withoutResponse: c.properties.writeWithoutResponse);
 
   Future<void> connect(BluetoothDevice d, {String? name}) async {
     if (link == LinkState.connected || link == LinkState.connecting) return;
@@ -211,51 +298,25 @@ class ScooterService extends ChangeNotifier {
     link = LinkState.connecting;
     statusText = 'Подключаюсь к $deviceName…';
     noReply = false;
+    _keys = null;
+    auth = AuthState.unknown;
     _log('**', 'connect ${d.remoteId.str} $deviceName');
     notifyListeners();
     try {
-      await _connSub?.cancel();
-      _connSub = d.connectionState.listen((s) {
-        if (s == BluetoothConnectionState.disconnected && link == LinkState.connected) {
-          _onDisconnected();
-        }
-      });
-      await d.connect(timeout: const Duration(seconds: 15), autoConnect: false);
-      final services = await d.discoverServices();
-      BluetoothCharacteristic? tx;
-      BluetoothCharacteristic? rx;
-      for (final s in services) {
-        _log('**', 'service ${s.serviceUuid.str}');
-        if (s.serviceUuid != _uartService) continue;
-        for (final c in s.characteristics) {
-          if (c.characteristicUuid == _txUuid) tx = c;
-          if (c.characteristicUuid == _rxUuid) rx = c;
-        }
-      }
-      if (tx == null || rx == null) {
-        throw StateError('UART-сервис не найден');
-      }
-      _tx = tx;
-      await rx.setNotifyValue(true);
-      await _rxSub?.cancel();
-      _rxSub = rx.onValueReceived.listen(_onData);
-      d.cancelWhenDisconnected(_rxSub!);
-
+      await _open(d);
       final p = await SharedPreferences.getInstance();
       await p.setString('lastDevice', d.remoteId.str);
       await p.setString('lastDeviceName', deviceName ?? '');
 
       link = LinkState.connected;
       statusText = null;
-      _parser.reset();
       trip.pause();
-      _queueOneShots();
-      _startPolling();
       try {
         await WakelockPlus.enable();
       } catch (_) {}
       _log('**', 'connected');
       notifyListeners();
+      await _afterOpen();
     } catch (e) {
       _log('**', 'connect error: $e');
       statusText = 'Не удалось подключиться: $e';
@@ -265,6 +326,147 @@ class ScooterService extends ChangeNotifier {
       } catch (_) {}
       notifyListeners();
     }
+  }
+
+  /// Решаем, как говорить с самокатом: открыто, по токену или нужна привязка.
+  Future<void> _afterOpen() async {
+    final d = _device;
+    if (d == null) return;
+    if (_miAuth == null) {
+      auth = AuthState.plain;
+      _startPolling();
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    final tokenHex = p.getString('token_${d.remoteId.str}');
+    if (tokenHex != null) {
+      final ok = await _login(_fromHex(tokenHex));
+      if (ok) return;
+    }
+    // Токена нет — проверим, может самокат отвечает и без шифрования.
+    if (tokenHex == null && await _probePlain()) {
+      auth = AuthState.plain;
+      _log('**', 'самокат отвечает без шифрования');
+      _startPolling();
+      return;
+    }
+    if (auth != AuthState.failed) {
+      auth = AuthState.needRegister;
+      authStatus = 'Нужна привязка к самокату (один раз)';
+    }
+    notifyListeners();
+  }
+
+  Future<bool> _probePlain() async {
+    final before = lastRx;
+    for (var i = 0; i < 2; i++) {
+      await _sendRaw(readRequest(Addr.esc, 0xB0, 0x20));
+      await Future.delayed(const Duration(milliseconds: 700));
+      if (lastRx != before) return true;
+    }
+    return false;
+  }
+
+  Future<bool> _login(Uint8List token) async {
+    final a = _miAuth;
+    if (a == null) return false;
+    auth = AuthState.loggingIn;
+    authStatus = 'Вход…';
+    notifyListeners();
+    try {
+      _keys = await a.login(token);
+      _uartIt = 0;
+      auth = AuthState.ready;
+      authStatus = null;
+      _log('**', 'вход выполнен, канал зашифрован');
+      notifyListeners();
+      _startPolling();
+      return true;
+    } on MiAuthError catch (e) {
+      _log('**', 'login error: $e');
+      auth = e.needsRegister ? AuthState.needRegister : AuthState.failed;
+      authStatus = e.message;
+    } on TimeoutException catch (e) {
+      _log('**', 'login timeout: $e');
+      auth = AuthState.needRegister;
+      authStatus = 'Самокат не принял вход — нужна привязка';
+    } catch (e) {
+      _log('**', 'login error: $e');
+      auth = AuthState.failed;
+      authStatus = 'Ошибка входа: $e';
+    }
+    notifyListeners();
+    return false;
+  }
+
+  /// Привязка: самокат пищит и ждёт короткого нажатия кнопки питания.
+  Future<void> register() async {
+    final d = _device;
+    if (d == null || link != LinkState.connected || _miAuth == null) return;
+    _stopPolling();
+    auth = AuthState.registering;
+    for (var attempt = 1; attempt <= 4; attempt++) {
+      authStatus = attempt == 1
+          ? 'Привязка… Когда самокат пискнет — коротко нажми кнопку питания'
+          : 'Попытка $attempt из 4. Самокат пискнет — сразу коротко нажми кнопку питания';
+      notifyListeners();
+      try {
+        final token = await _miAuth!.register();
+        final p = await SharedPreferences.getInstance();
+        await p.setString('token_${d.remoteId.str}', _toHex(token));
+        _log('**', 'привязка успешна');
+        authStatus = 'Привязано! Вхожу…';
+        notifyListeners();
+        // После привязки самокат ждёт новый сеанс — переподключаемся и входим.
+        await _quietReopen(d);
+        if (await _login(token)) return;
+        return;
+      } on TimeoutException {
+        _log('**', 'привязка: нет ответа (попытка $attempt) — ждём кнопку и переподключаемся');
+        authStatus = 'Нажми кнопку питания на самокате сейчас…';
+        notifyListeners();
+        await _quietReopen(d, pause: const Duration(seconds: 5));
+      } on MiAuthError catch (e) {
+        _log('**', 'register error: $e');
+        auth = AuthState.failed;
+        authStatus = e.message;
+        notifyListeners();
+        return;
+      } catch (e) {
+        _log('**', 'register error: $e');
+        await _quietReopen(d, pause: const Duration(seconds: 3));
+      }
+    }
+    auth = AuthState.needRegister;
+    authStatus = 'Не получилось привязать. Попробуй ещё раз и нажми кнопку сразу после писка.';
+    notifyListeners();
+  }
+
+  Future<void> _quietReopen(BluetoothDevice d, {Duration pause = const Duration(seconds: 1)}) async {
+    _quietReconnect = true;
+    try {
+      try {
+        await d.disconnect();
+      } catch (_) {}
+      await Future.delayed(pause);
+      await _open(d);
+    } catch (e) {
+      _log('**', 'reopen error: $e');
+    } finally {
+      _quietReconnect = false;
+    }
+  }
+
+  Future<void> forgetPairing() async {
+    final d = _device;
+    if (d == null) return;
+    final p = await SharedPreferences.getInstance();
+    await p.remove('token_${d.remoteId.str}');
+    _keys = null;
+    _stopPolling();
+    auth = _miAuth == null ? AuthState.plain : AuthState.needRegister;
+    authStatus = 'Привязка сброшена';
+    notifyListeners();
   }
 
   Future<void> disconnect() async {
@@ -277,9 +479,11 @@ class ScooterService extends ChangeNotifier {
   }
 
   Future<void> _onDisconnected() async {
+    if (_quietReconnect) return;
     _stopPolling();
     _log('**', 'disconnected');
     link = LinkState.idle;
+    _keys = null;
     speed = 0;
     trip.pause();
     try {
@@ -288,7 +492,6 @@ class ScooterService extends ChangeNotifier {
     await _saveAvg();
     notifyListeners();
     if (!_userDisconnect && _device != null) {
-      // Связь потерялась сама — пробуем вернуться.
       final d = _device!;
       Future.delayed(const Duration(seconds: 2), () {
         if (link == LinkState.idle && !_userDisconnect) connect(d, name: deviceName);
@@ -311,7 +514,7 @@ class ScooterService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---- опрос ----
+  // ---- опрос: строго запрос → ответ ----
   void _queueOneShots() {
     _oneShot
       ..clear()
@@ -326,10 +529,19 @@ class ScooterService extends ChangeNotifier {
 
   void _startPolling() {
     _stopPolling();
+    _queueOneShots();
     _pollStep = 0;
-    final connectedAt = DateTime.now();
-    _poll = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      if (link != LinkState.connected) return;
+    final gen = ++_pollGen;
+    unawaited(_pollLoop(gen));
+  }
+
+  void _stopPolling() {
+    _pollGen++;
+  }
+
+  Future<void> _pollLoop(int gen) async {
+    final startedAt = DateTime.now();
+    while (gen == _pollGen && link == LinkState.connected) {
       Uint8List req;
       if (_oneShot.isNotEmpty && _pollStep % 4 == 3) {
         req = _oneShot.removeAt(0);
@@ -347,28 +559,43 @@ class ScooterService extends ChangeNotifier {
         }
       }
       _pollStep++;
-      _send(req);
-      final silentFor = DateTime.now().difference(lastRx ?? connectedAt);
+      _pending = Completer<void>();
+      await _send(req);
+      await _pending!.future.timeout(const Duration(milliseconds: 500), onTimeout: () {});
+      await Future.delayed(const Duration(milliseconds: 40));
+
+      final silentFor = DateTime.now().difference(lastRx ?? startedAt);
       final nr = silentFor > const Duration(seconds: 5);
       if (nr != noReply) {
         noReply = nr;
-        if (nr) _log('**', 'нет ответов 5 с — возможно, нужна авторизация (шифрованный протокол)');
+        if (nr) _log('**', 'нет ответов 5 с');
         notifyListeners();
       }
-    });
+    }
   }
 
-  void _stopPolling() {
-    _poll?.cancel();
-    _poll = null;
+  /// Отправка команды 55 AA: шифруем, если вошли по MiAuth.
+  Future<void> _send(Uint8List plainFrame) async {
+    final k = _keys;
+    if (k != null) {
+      final enc = MiCrypto.encryptUart(k.appKey, k.appIv, plainFrame, _uartIt);
+      _uartIt++;
+      _log('TX', '${toHex(plainFrame)}  ⇒  ${toHex(enc)}');
+      await _sendRaw(enc, logIt: false);
+    } else {
+      await _sendRaw(plainFrame);
+    }
   }
 
-  Future<void> _send(Uint8List bytes) async {
+  Future<void> _sendRaw(Uint8List bytes, {bool logIt = true}) async {
     final tx = _tx;
     if (tx == null) return;
-    _log('TX', toHex(bytes));
+    if (logIt) _log('TX', toHex(bytes));
     try {
-      await tx.write(bytes, withoutResponse: tx.properties.writeWithoutResponse);
+      for (var i = 0; i < bytes.length; i += 20) {
+        final end = i + 20 < bytes.length ? i + 20 : bytes.length;
+        await _write(tx, bytes.sublist(i, end));
+      }
     } catch (e) {
       _log('**', 'write error: $e');
     }
@@ -406,6 +633,9 @@ class ScooterService extends ChangeNotifier {
     if (frames.isEmpty) return;
     lastRx = DateTime.now();
     for (final f in frames) {
+      if (_keys != null) {
+        _log('**', '⇐ ${f.addr.toRadixString(16)} ${f.cmd.toRadixString(16)} ${f.arg.toRadixString(16)} ${toHex(f.data)}');
+      }
       try {
         if (f.addr == Addr.escReply) {
           _handleEsc(f);
@@ -416,6 +646,8 @@ class ScooterService extends ChangeNotifier {
         _log('**', 'parse error arg=${f.arg.toRadixString(16)}: $e');
       }
     }
+    final p = _pending;
+    if (p != null && !p.isCompleted) p.complete();
     notifyListeners();
   }
 
@@ -478,8 +710,6 @@ class ScooterService extends ChangeNotifier {
     }
   }
 
-  /// На ходу ток в основном тянет из батареи. Если при движении он почти всегда
-  /// отрицательный — значит у этой BMS знак обратный, переворачиваем.
   void _detectSign(double raw) {
     if (speed < 8 || raw.abs() < 1.5) return;
     _signVotes += raw * _currentSign > 0 ? 1 : -1;
@@ -490,4 +720,8 @@ class ScooterService extends ChangeNotifier {
       _log('**', 'знак тока перевёрнут');
     }
   }
+
+  static String _toHex(List<int> b) => b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  static Uint8List _fromHex(String s) =>
+      Uint8List.fromList([for (var i = 0; i + 1 < s.length; i += 2) int.parse(s.substring(i, i + 2), radix: 16)]);
 }

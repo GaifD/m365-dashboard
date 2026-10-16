@@ -35,7 +35,23 @@ class RideScreen extends StatelessWidget {
                   icon: Icons.bluetooth_searching,
                 ),
               ],
-              if (connected && s.noReply) ...[
+              if (connected && !s.dataFlowing) ...[
+                const SizedBox(height: 8),
+                Banner2(
+                  text: s.authStatus ?? 'Подготовка связи…',
+                  color: s.auth == AuthState.failed ? C.red : C.accent,
+                  icon: Icons.lock_outline,
+                ),
+                if (s.auth == AuthState.needRegister || s.auth == AuthState.failed) ...[
+                  const SizedBox(height: 8),
+                  FilledButton.icon(
+                    onPressed: onOpenScooter,
+                    icon: const Icon(Icons.link),
+                    label: const Text('Привязать самокат'),
+                  ),
+                ],
+              ],
+              if (s.dataFlowing && s.noReply) ...[
                 const SizedBox(height: 8),
                 const Banner2(
                   text: 'Самокат подключён, но не отвечает. Возможно, нужна авторизация. '
@@ -160,7 +176,11 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final connected = s.link == LinkState.connected;
     final status = switch (s.link) {
-      LinkState.connected => s.noReply ? 'подключено · нет ответа' : 'подключено · BLE',
+      LinkState.connected => !s.dataFlowing
+          ? 'подключено · нужна авторизация'
+          : s.noReply
+              ? 'подключено · нет ответа'
+              : (s.auth == AuthState.ready ? 'подключено · шифрование' : 'подключено · BLE'),
       LinkState.connecting => 'подключаюсь…',
       LinkState.scanning => 'поиск…',
       LinkState.idle => 'не подключено',

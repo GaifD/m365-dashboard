@@ -77,6 +77,10 @@ class ScooterScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              if (connected && s.auth != AuthState.plain) ...[
+                const SectionTitle('Привязка'),
+                _AuthCard(s: s),
+              ],
               if (!connected && s.scanResults.isNotEmpty) ...[
                 const SectionTitle('Найдено'),
                 Card2(
@@ -121,7 +125,7 @@ class ScooterScreen extends StatelessWidget {
                           selected: (s.kers != null && s.kers! >= 0 && s.kers! <= 2) ? <int>{s.kers!} : <int>{},
                           emptySelectionAllowed: true,
                           showSelectedIcon: false,
-                          onSelectionChanged: connected
+                          onSelectionChanged: s.dataFlowing
                               ? (v) {
                                   if (v.isNotEmpty) s.setKers(v.first);
                                 }
@@ -139,14 +143,14 @@ class ScooterScreen extends StatelessWidget {
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Круиз-контроль', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                       value: s.cruise ?? false,
-                      onChanged: connected ? s.setCruise : null,
+                      onChanged: s.dataFlowing ? s.setCruise : null,
                     ),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Задний фонарь всегда',
                           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                       value: s.tailLight ?? false,
-                      onChanged: connected ? s.setTailLight : null,
+                      onChanged: s.dataFlowing ? s.setTailLight : null,
                     ),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -156,12 +160,12 @@ class ScooterScreen extends StatelessWidget {
                         children: [
                           IconButton(
                             tooltip: 'Заблокировать',
-                            onPressed: connected ? s.lock : null,
+                            onPressed: s.dataFlowing ? s.lock : null,
                             icon: const Icon(Icons.lock_outline),
                           ),
                           IconButton(
                             tooltip: 'Разблокировать',
-                            onPressed: connected ? s.unlock : null,
+                            onPressed: s.dataFlowing ? s.unlock : null,
                             icon: const Icon(Icons.lock_open),
                           ),
                         ],
@@ -195,11 +199,69 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.1', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.2', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _AuthCard extends StatelessWidget {
+  final ScooterService s;
+  const _AuthCard({required this.s});
+
+  @override
+  Widget build(BuildContext context) {
+    final busy = s.auth == AuthState.registering || s.auth == AuthState.loggingIn;
+    final ready = s.auth == AuthState.ready;
+    return Card2(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(ready ? Icons.lock : Icons.lock_open, color: ready ? C.accent : C.amber, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  ready ? 'Приложение привязано, канал зашифрован' : (s.authStatus ?? 'Нужна привязка'),
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, height: 1.35),
+                ),
+              ),
+              if (busy) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+            ],
+          ),
+          if (!ready && !busy) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Самокат шифрует связь. Привязка нужна один раз:\n'
+              '1. Нажми «Привязать».\n'
+              '2. Самокат пискнет — сразу коротко нажми кнопку питания.\n'
+              '3. Если не вышло, приложение само повторит, жми после следующего писка.\n\n'
+              'm365 Dashboard после этого, скорее всего, придётся привязать заново.',
+              style: TextStyle(fontSize: 12, color: C.textSoft, height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: s.register,
+                icon: const Icon(Icons.link),
+                label: const Text('Привязать'),
+              ),
+            ),
+          ],
+          if (ready) ...[
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(onPressed: s.forgetPairing, child: const Text('Сбросить привязку')),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
