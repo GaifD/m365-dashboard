@@ -29,6 +29,23 @@ jobs:
           fi
           python3 tool/patch_android.py
 
+      - name: Free disk space and preinstall NDK
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+          NDK=$(grep -rhoE 'ndkVersion *= *"[0-9.]+"' android/app/build.gradle.kts | grep -oE '[0-9.]+' || true)
+          if [ -z "$NDK" ]; then NDK=$(grep -rhoE 'ndkVersion *= *[0-9.]+' $FLUTTER_ROOT/packages/flutter_tools/gradle/src/main/kotlin/*.kt 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); fi
+          if [ -z "$NDK" ]; then NDK=28.2.13676358; fi
+          echo "NDK $NDK"
+          SDKM=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+          for i in 1 2 3; do
+            yes | $SDKM --install "ndk;$NDK" > /tmp/ndk.log 2>&1 && break
+            echo "NDK install attempt $i failed"; tail -3 /tmp/ndk.log
+            rm -rf $ANDROID_SDK_ROOT/ndk/$NDK $ANDROID_SDK_ROOT/.temp
+            sleep 5
+          done
+          ls $ANDROID_SDK_ROOT/ndk
+
       - name: Fonts
         run: |
           mkdir -p assets/fonts
