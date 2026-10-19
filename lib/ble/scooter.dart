@@ -73,6 +73,8 @@ class ScooterService extends ChangeNotifier {
   // ---- настройки приложения ----
   bool keepScreenOn = false;
   bool batteryOptimizationOff = true;
+  bool serviceRunning = false;
+  String? serviceError;
 
   // ---- контроллер ----
   double speed = 0; // км/ч
@@ -359,7 +361,7 @@ class ScooterService extends ChangeNotifier {
       _disconnectedAt = null;
       statusText = null;
       await brain.attach(d.remoteId.str);
-      await SystemBridge.startService('M365 · подключено', deviceName ?? 'Самокат');
+      await startBackgroundService();
       await SystemBridge.setShowWhenLocked(true);
       if (keepScreenOn) {
         try {
@@ -530,6 +532,8 @@ class ScooterService extends ChangeNotifier {
     } catch (_) {}
     await _onDisconnected();
     await SystemBridge.stopService();
+    await Future.delayed(const Duration(milliseconds: 500));
+    await refreshServiceStatus();
   }
 
   Future<void> _onDisconnected() async {
@@ -567,6 +571,21 @@ class ScooterService extends ChangeNotifier {
     Future.delayed(delay, () {
       if (link == LinkState.idle && !_userDisconnect) connect(d, name: deviceName);
     });
+  }
+
+  Future<void> startBackgroundService() async {
+    final ok = await SystemBridge.startService('M365 · подключено', deviceName ?? 'Самокат');
+    await Future.delayed(const Duration(milliseconds: 1500));
+    await refreshServiceStatus();
+    _log('**', 'фоновая служба: start=$ok running=$serviceRunning ${serviceError ?? ''}');
+  }
+
+  Future<void> refreshServiceStatus() async {
+    if (!Platform.isAndroid) return;
+    final (running, err) = await SystemBridge.serviceStatus();
+    serviceRunning = running;
+    serviceError = err;
+    notifyListeners();
   }
 
   void _startNotifTimer() {

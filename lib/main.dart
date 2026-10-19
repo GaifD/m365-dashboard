@@ -62,6 +62,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       ScooterService.instance.refreshBatteryOptimization();
+      ScooterService.instance.refreshServiceStatus();
       _onBrain();
     }
   }

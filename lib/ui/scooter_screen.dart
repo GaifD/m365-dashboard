@@ -195,6 +195,22 @@ class ScooterScreen extends StatelessWidget {
                       ),
                       onTap: s.batteryOptimizationOff ? s.refreshBatteryOptimization : s.requestBatteryOptimizationOff,
                     ),
+                    ListTile(
+                      title: const Text('Фоновая служба', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                        s.serviceRunning
+                            ? 'Работает — значок в шторке, запись идёт при выключенном экране'
+                            : connected
+                                ? 'Не запущена${s.serviceError != null ? ': ${s.serviceError}' : ''}. Нажми, чтобы запустить'
+                                : 'Запускается при подключении к самокату',
+                        style: const TextStyle(fontSize: 12, color: C.muted, height: 1.35),
+                      ),
+                      trailing: Icon(
+                        s.serviceRunning ? Icons.check : Icons.warning_amber_rounded,
+                        color: s.serviceRunning ? C.accent : (connected ? C.amber : C.faint),
+                      ),
+                      onTap: connected ? s.startBackgroundService : s.refreshServiceStatus,
+                    ),
                     SwitchListTile(
                       title: const Text('Экран не гаснет', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                       subtitle: const Text('Пока самокат подключён. Для крепления на руль; в кармане лучше выключить',
@@ -240,7 +256,7 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.3', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.3.1', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );

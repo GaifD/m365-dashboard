@@ -18,6 +18,16 @@ class SystemBridge {
     } catch (_) {}
   }
 
+  /// (работает ли служба, последняя ошибка запуска)
+  static Future<(bool, String?)> serviceStatus() async {
+    try {
+      final m = await _ch.invokeMapMethod<String, dynamic>('serviceStatus');
+      return (m?['running'] == true, m?['error'] as String?);
+    } catch (e) {
+      return (false, 'канал: $e');
+    }
+  }
+
   static Future<void> stopService() async {
     try {
       await _ch.invokeMethod<void>('stopService');
