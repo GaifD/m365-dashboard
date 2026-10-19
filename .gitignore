@@ -6,5 +6,5 @@ build/
 .idea/
 *.iml
 assets/fonts/
-android/
+/android/
 pubspec.lock

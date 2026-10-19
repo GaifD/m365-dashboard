@@ -40,9 +40,13 @@ print("AndroidManifest patched")
 import shutil
 kt_dir = pathlib.Path("android/app/src/main/kotlin/com/gaifd/m365_dashboard")
 kt_dir.mkdir(parents=True, exist_ok=True)
+copied = []
 for f in pathlib.Path("tool/android").glob("*.kt"):
     shutil.copy(f, kt_dir / f.name)
+    copied.append(f.name)
     print("copied", f.name)
+assert "MainActivity.kt" in copied and "RideService.kt" in copied, f"native files missing: {copied}"
+
 
 # Старые плагины (flutter_blue_plus) компилируются под android-33, а свежие androidx
 # требуют 34+. Поднимаем compileSdk у всех библиотек-плагинов.
