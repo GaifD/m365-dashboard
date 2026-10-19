@@ -93,3 +93,14 @@ if 'create("stable")' not in ag:
                     'signingConfig = signingConfigs.getByName("stable")')
     app_gradle.write_text(ag, encoding="utf-8")
     print("app/build.gradle.kts: stable signing")
+
+# Без обфускации/вырезания кода R8: плагины (shared_preferences и др.) вызывают
+# свои методы через рефлексию/корутины, и R8 их вырезает → NoSuchMethodError в release.
+ag = app_gradle.read_text(encoding="utf-8")
+if "isMinifyEnabled = false" not in ag:
+    anchor = 'signingConfig = signingConfigs.getByName("stable")'
+    assert anchor in ag, "stable signingConfig line not found"
+    ag = ag.replace(anchor, anchor + "\n            isMinifyEnabled = false\n            isShrinkResources = false")
+    app_gradle.write_text(ag, encoding="utf-8")
+    print("app/build.gradle.kts: minify off")
+print(app_gradle.read_text(encoding="utf-8"))

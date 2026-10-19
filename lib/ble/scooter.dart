@@ -372,7 +372,8 @@ class ScooterService extends ChangeNotifier {
       await _afterOpen();
     } catch (e) {
       _log('**', 'connect error: $e');
-      statusText = 'Не удалось подключиться: $e';
+      final msg = '$e'.split('\n').first;
+      statusText = 'Не удалось подключиться: ${msg.length > 140 ? '${msg.substring(0, 140)}…' : msg}';
       link = LinkState.idle;
       try {
         await d.disconnect();
