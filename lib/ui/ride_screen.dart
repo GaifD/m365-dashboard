@@ -13,15 +13,15 @@ class RideScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final s = ScooterService.instance;
+    final b = s.brain;
     return AnimatedBuilder(
-      animation: s,
+      animation: Listenable.merge([s, b]),
       builder: (context, _) {
         final connected = s.link == LinkState.connected;
-        final trip = s.trip;
-        final inst = trip.instantWhKm;
-        final avg = trip.avgWhKm;
-        final range = s.rangeKm;
-        final remWh = s.remainingWh;
+        final trip = b.trip;
+        final inst = b.instantWhKm;
+        final range = b.rangeKm;
+        final remWh = b.remainingWh;
         return SafeArea(
           child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -54,8 +54,19 @@ class RideScreen extends StatelessWidget {
               if (s.dataFlowing && s.noReply) ...[
                 const SizedBox(height: 8),
                 const Banner2(
-                  text: 'Самокат подключён, но не отвечает. Возможно, нужна авторизация. '
-                      'Скопируй журнал (Самокат → Журнал пакетов) и пришли мне.',
+                  text: 'Самокат подключён, но не отвечает. Скопируй журнал (Самокат → Журнал пакетов) и пришли мне.',
+                ),
+              ],
+              if (connected && !s.batteryOptimizationOff) ...[
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: s.requestBatteryOptimizationOff,
+                  borderRadius: BorderRadius.circular(14),
+                  child: const Banner2(
+                    text: 'Разреши приложению работать в фоне без ограничений, иначе телефон может '
+                        'прерывать запись в кармане. Нажми здесь.',
+                    icon: Icons.battery_alert,
+                  ),
                 ),
               ],
               const SizedBox(height: 6),
@@ -100,38 +111,57 @@ class RideScreen extends StatelessWidget {
                 childAspectRatio: 1.55,
                 children: [
                   StatTile(label: 'Расход сейчас', value: fmt(inst), unit: 'Вт·ч/км'),
-                  StatTile(label: 'Средний за поездку', value: fmt(avg), unit: 'Вт·ч/км', valueColor: C.accent),
+                  StatTile(
+                      label: 'Средний за поездку', value: fmt(trip?.avgWhKm), unit: 'Вт·ч/км', valueColor: C.accent),
                   StatTile(
                     label: 'Остаток энергии',
-                    value: s.remainingMah > 0 ? remWh.toStringAsFixed(0) : '—',
-                    unit: 'Вт·ч из ~${s.factoryWh.toStringAsFixed(0)}',
+                    value: remWh == null ? '—' : remWh.toStringAsFixed(0),
+                    unit: 'Вт·ч из ~${(b.whPerPct * 100).toStringAsFixed(0)}',
                   ),
                   StatTile(
                     label: 'Запас хода',
                     value: range == null ? '—' : '~${range.toStringAsFixed(0)}',
-                    unit: 'км при ${s.rangeWhKm.toStringAsFixed(1)} Вт·ч/км',
+                    unit: 'км при ${b.rangeWhKm.toStringAsFixed(1)} Вт·ч/км',
                   ),
                 ],
               ),
               const SizedBox(height: 10),
-              Card2(
-                padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
-                child: Row(
-                  children: [
-                    Expanded(child: MiniStat(label: 'Пробег', value: '${trip.km.toStringAsFixed(1)} км')),
-                    Expanded(child: MiniStat(label: 'Время', value: _dur(trip.moving))),
-                    Expanded(child: MiniStat(label: 'Потрачено', value: '${trip.whNet.toStringAsFixed(0)} Вт·ч')),
-                    Expanded(
-                        child: MiniStat(
-                            label: 'Рекуп.', value: '+${trip.whRegen.toStringAsFixed(1)}', color: C.amber)),
-                    IconButton(
-                      tooltip: 'Новая поездка',
-                      onPressed: () => _confirmNewTrip(context),
-                      icon: const Icon(Icons.restart_alt, color: C.muted),
-                    ),
-                  ],
+              if (trip != null)
+                Card2(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+                  child: Row(
+                    children: [
+                      Expanded(child: MiniStat(label: 'Пробег', value: '${trip.km.toStringAsFixed(1)} км')),
+                      Expanded(child: MiniStat(label: 'Время', value: _dur(trip.movingSec))),
+                      Expanded(child: MiniStat(label: 'Потрачено', value: '${trip.wh.toStringAsFixed(0)} Вт·ч')),
+                      Expanded(
+                          child: MiniStat(label: 'Рекуп.', value: '+${trip.regen.toStringAsFixed(1)}', color: C.amber)),
+                      IconButton(
+                        tooltip: 'Завершить поездку',
+                        onPressed: () => _confirmFinish(context),
+                        icon: const Icon(Icons.flag_outlined, color: C.muted),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                Card2(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.play_circle_outline, color: C.muted, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          b.liveCharge != null
+                              ? 'Идёт зарядка: +${b.liveCharge!.wh.toStringAsFixed(0)} Вт·ч в батарею'
+                              : 'Поездка начнётся сама, как только поедешь',
+                          style: const TextStyle(fontSize: 13, color: C.textSoft),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         );
@@ -139,27 +169,28 @@ class RideScreen extends StatelessWidget {
     );
   }
 
-  static String _dur(Duration d) {
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
+  static String _dur(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
     return '$m:${s.toString().padLeft(2, '0')}';
   }
 
-  void _confirmNewTrip(BuildContext context) {
+  void _confirmFinish(BuildContext context) {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: C.surface,
-        title: const Text('Начать новую поездку?'),
-        content: const Text('Счётчики пробега, расхода и рекуперации обнулятся.'),
+        title: const Text('Завершить поездку?'),
+        content: const Text('Обычно поездка завершается сама через 3 минуты стоянки. '
+            'Следующая начнётся автоматически, когда поедешь.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
           TextButton(
             onPressed: () {
-              ScooterService.instance.newTrip();
+              ScooterService.instance.brain.finishTripNow();
               Navigator.pop(ctx);
             },
-            child: const Text('Начать'),
+            child: const Text('Завершить'),
           ),
         ],
       ),

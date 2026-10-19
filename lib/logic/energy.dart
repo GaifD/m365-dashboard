@@ -1,4 +1,4 @@
-// Расчёты энергии: остаток Вт·ч по кривой напряжения ячеек, учёт поездки, Вт·ч/км.
+// Кривая напряжения ячейки (используется как запасной вариант оценки заряда).
 
 class EnergyMath {
   // Типичная кривая напряжения покоя (OCV) ячейки NMC 18650: заряд % → вольты.
@@ -46,76 +46,4 @@ class EnergyMath {
 
   static double remainingWh(int remainingMah, double socPct) =>
       remainingMah / 1000.0 * meanPackVoltage(socPct);
-}
-
-class _Slice {
-  final double wh;
-  final double km;
-  final DateTime t;
-  _Slice(this.wh, this.km, this.t);
-}
-
-/// Учёт текущей поездки.
-class TripTracker {
-  DateTime started = DateTime.now();
-  DateTime? _last;
-  double km = 0;
-  double whNet = 0; // потрачено минус рекуперация
-  double whRegen = 0;
-  double maxSpeed = 0;
-  Duration moving = Duration.zero;
-
-  final List<_Slice> _window = [];
-  static const double _windowKm = 0.15;
-  static const Duration _windowAge = Duration(seconds: 30);
-
-  void reset() {
-    started = DateTime.now();
-    _last = null;
-    km = 0;
-    whNet = 0;
-    whRegen = 0;
-    maxSpeed = 0;
-    moving = Duration.zero;
-    _window.clear();
-  }
-
-  void pause() => _last = null;
-
-  void update(DateTime t, double powerW, double speedKmh) {
-    final last = _last;
-    _last = t;
-    if (last == null) return;
-    final dtMs = t.difference(last).inMilliseconds;
-    if (dtMs <= 0 || dtMs > 3000) return; // разрыв связи — не интегрируем
-    final dt = dtMs / 1000.0;
-    final v = speedKmh < 0 ? 0.0 : speedKmh;
-    final dWh = powerW * dt / 3600.0;
-    final dKm = v * dt / 3600.0;
-    km += dKm;
-    whNet += dWh;
-    if (dWh < 0) whRegen += -dWh;
-    if (v > maxSpeed) maxSpeed = v;
-    if (v > 1) moving += Duration(milliseconds: dtMs);
-
-    _window.add(_Slice(dWh, dKm, t));
-    var wKm = _window.fold<double>(0, (a, s) => a + s.km);
-    while (_window.length > 2 &&
-        (wKm - _window.first.km >= _windowKm || t.difference(_window.first.t) > _windowAge)) {
-      wKm -= _window.first.km;
-      _window.removeAt(0);
-    }
-  }
-
-  /// Мгновенный расход, сглаженный по последним ~150 м / 30 с.
-  double? get instantWhKm {
-    final wKm = _window.fold<double>(0, (a, s) => a + s.km);
-    if (wKm < 0.02) return null;
-    final wWh = _window.fold<double>(0, (a, s) => a + s.wh);
-    return wWh / wKm;
-  }
-
-  double? get avgWhKm => km >= 0.2 ? whNet / km : null;
-
-  double get avgSpeed => moving.inSeconds > 0 ? km / (moving.inSeconds / 3600.0) : 0;
 }

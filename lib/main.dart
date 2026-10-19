@@ -40,8 +40,60 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _tab = 0;
+  bool _dialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    ScooterService.instance.brain.addListener(_onBrain);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    ScooterService.instance.brain.removeListener(_onBrain);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ScooterService.instance.refreshBatteryOptimization();
+      _onBrain();
+    }
+  }
+
+  void _onBrain() {
+    final p = ScooterService.instance.brain.pendingUnrecorded;
+    if (p == null || _dialogOpen || !mounted) return;
+    _dialogOpen = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final add = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: C.surface,
+          title: Text('Обнаружено ${p.km.toStringAsFixed(1)} км без записи'),
+          content: Text(
+            'Самокат проехал их, пока приложение не было подключено '
+            '(между ${fmtDate(p.from)} и ${fmtDate(p.to)}).\n\n'
+            'Добавить в историю? Километры точные, энергия примерная. '
+            'На средний расход и прогнозы такие поездки не влияют.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Не добавлять')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Добавить')),
+          ],
+        ),
+      );
+      ScooterService.instance.brain.resolveUnrecorded(add == true);
+      _dialogOpen = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

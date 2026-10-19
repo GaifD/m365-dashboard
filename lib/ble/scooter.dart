@@ -8,7 +8,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-import '../logic/energy.dart';
+import '../logic/brain.dart';
+import '../platform/system.dart';
 import 'miauth.dart';
 import 'micrypto.dart';
 import 'protocol.dart';
@@ -32,6 +33,12 @@ class LogLine {
   }
 }
 
+class _Need {
+  final Uint8List req;
+  int tries = 0;
+  _Need(this.req);
+}
+
 class ScooterService extends ChangeNotifier {
   ScooterService._() {
     _parser.decryptor = (frame) {
@@ -52,6 +59,8 @@ class ScooterService extends ChangeNotifier {
 
   static const int factoryMahDefault = 12800; // M365 Pro, родная батарея
 
+  final Brain brain = Brain();
+
   // ---- состояние связи ----
   LinkState link = LinkState.idle;
   AuthState auth = AuthState.unknown;
@@ -60,6 +69,10 @@ class ScooterService extends ChangeNotifier {
   String? statusText;
   List<ScanResult> scanResults = [];
   bool noReply = false;
+
+  // ---- настройки приложения ----
+  bool keepScreenOn = false;
+  bool batteryOptimizationOff = true;
 
   // ---- контроллер ----
   double speed = 0; // км/ч
@@ -88,25 +101,20 @@ class ScooterService extends ChangeNotifier {
   int? chargeCount;
   DateTime? lastRx;
 
-  // ---- расчёты ----
-  final TripTracker trip = TripTracker();
-  double savedAvgWhKm = 13.0;
   int _currentSign = 1;
   int _signVotes = 0;
 
   double get power => voltage * current;
-  int get batteryPct => bmsPct > 0 ? bmsPct : escBattery;
-  double get remainingWh => EnergyMath.remainingWh(remainingMah, batteryPct.toDouble());
-  int get capacityMah => factoryMah ?? factoryMahDefault;
-  double get factoryWh => capacityMah / 1000.0 * 36.0 * 1.03; // ~474 Вт·ч для 12 800 мАч
 
-  double get rangeWhKm {
-    final a = trip.avgWhKm;
-    if (a != null && trip.km >= 1.0 && a > 3) return a;
-    return savedAvgWhKm;
+  /// Заряд для показа: честный («как в покое»), если известен.
+  int get batteryPct {
+    final h = brain.honestPct;
+    if (h != null) return h.round();
+    return bmsPct > 0 ? bmsPct : escBattery;
   }
 
-  double? get rangeKm => remainingMah > 0 ? remainingWh / rangeWhKm : null;
+  int get capacityMah => factoryMah ?? factoryMahDefault;
+  double get factoryWh => capacityMah / 1000.0 * 36.0 * 1.03; // ~474 Вт·ч для 12 800 мАч
 
   double get cellSpread {
     final v = cells.where((c) => c > 1).toList();
@@ -140,23 +148,56 @@ class ScooterService extends ChangeNotifier {
   StreamSubscription<BluetoothConnectionState>? _connSub;
   final FrameParser _parser = FrameParser();
   bool _userDisconnect = false;
-  bool _quietReconnect = false; // переподключение внутри привязки — без автологики
+  bool _quietReconnect = false;
+  bool _wasConnected = false;
+  DateTime? _disconnectedAt;
+  Timer? _notifTimer;
   MiAuth? _miAuth;
   MiKeys? _keys;
   int _uartIt = 0;
   int _pollGen = 0;
   int _pollStep = 0;
-  final List<Uint8List> _oneShot = [];
+  final Map<String, _Need> _needs = {};
+  int _needCursor = 0;
+  DateTime _lastChargeCountReq = DateTime.fromMillisecondsSinceEpoch(0);
   Completer<void>? _pending;
 
   Future<void> init() async {
     final p = await SharedPreferences.getInstance();
-    savedAvgWhKm = p.getDouble('avgWhKm') ?? 13.0;
+    keepScreenOn = p.getBool('keepScreenOn') ?? false;
+    await brain.init();
+    await refreshBatteryOptimization();
     final last = p.getString('lastDevice');
     final lastName = p.getString('lastDeviceName');
     if (last != null) {
       unawaited(connect(BluetoothDevice.fromId(last), name: lastName));
     }
+  }
+
+  Future<void> setKeepScreenOn(bool on) async {
+    keepScreenOn = on;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('keepScreenOn', on);
+    try {
+      if (on && link == LinkState.connected) {
+        await WakelockPlus.enable();
+      } else {
+        await WakelockPlus.disable();
+      }
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> refreshBatteryOptimization() async {
+    if (!Platform.isAndroid) return;
+    batteryOptimizationOff = await SystemBridge.isIgnoringBatteryOptimizations();
+    notifyListeners();
+  }
+
+  Future<void> requestBatteryOptimizationOff() async {
+    await SystemBridge.requestIgnoreBatteryOptimizations();
+    await Future.delayed(const Duration(seconds: 1));
+    await refreshBatteryOptimization();
   }
 
   Future<bool> _ensurePermissions() async {
@@ -168,6 +209,9 @@ class ScooterService extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+    try {
+      await Permission.notification.request();
+    } catch (_) {}
     final st = await FlutterBluePlus.adapterState
         .where((s) => s != BluetoothAdapterState.unknown)
         .first
@@ -307,13 +351,22 @@ class ScooterService extends ChangeNotifier {
       final p = await SharedPreferences.getInstance();
       await p.setString('lastDevice', d.remoteId.str);
       await p.setString('lastDeviceName', deviceName ?? '');
+      _currentSign = p.getInt('sign_${d.remoteId.str}') ?? 1;
+      _signVotes = 0;
 
       link = LinkState.connected;
+      _wasConnected = true;
+      _disconnectedAt = null;
       statusText = null;
-      trip.pause();
-      try {
-        await WakelockPlus.enable();
-      } catch (_) {}
+      await brain.attach(d.remoteId.str);
+      await SystemBridge.startService('M365 · подключено', deviceName ?? 'Самокат');
+      await SystemBridge.setShowWhenLocked(true);
+      if (keepScreenOn) {
+        try {
+          await WakelockPlus.enable();
+        } catch (_) {}
+      }
+      _startNotifTimer();
       _log('**', 'connected');
       notifyListeners();
       await _afterOpen();
@@ -325,6 +378,7 @@ class ScooterService extends ChangeNotifier {
         await d.disconnect();
       } catch (_) {}
       notifyListeners();
+      _scheduleReconnect();
     }
   }
 
@@ -343,7 +397,6 @@ class ScooterService extends ChangeNotifier {
       final ok = await _login(_fromHex(tokenHex));
       if (ok) return;
     }
-    // Токена нет — проверим, может самокат отвечает и без шифрования.
     if (tokenHex == null && await _probePlain()) {
       auth = AuthState.plain;
       _log('**', 'самокат отвечает без шифрования');
@@ -417,9 +470,8 @@ class ScooterService extends ChangeNotifier {
         _log('**', 'привязка успешна');
         authStatus = 'Привязано! Вхожу…';
         notifyListeners();
-        // После привязки самокат ждёт новый сеанс — переподключаемся и входим.
         await _quietReopen(d);
-        if (await _login(token)) return;
+        await _login(token);
         return;
       } on TimeoutException {
         _log('**', 'привязка: нет ответа (попытка $attempt) — ждём кнопку и переподключаемся');
@@ -476,60 +528,100 @@ class ScooterService extends ChangeNotifier {
       await _device?.disconnect();
     } catch (_) {}
     await _onDisconnected();
+    await SystemBridge.stopService();
   }
 
   Future<void> _onDisconnected() async {
     if (_quietReconnect) return;
+    if (link == LinkState.idle && _disconnectedAt != null) return;
     _stopPolling();
+    _notifTimer?.cancel();
     _log('**', 'disconnected');
     link = LinkState.idle;
     _keys = null;
     speed = 0;
-    trip.pause();
+    _disconnectedAt = DateTime.now();
+    brain.detach();
+    await SystemBridge.setShowWhenLocked(false);
     try {
       await WakelockPlus.disable();
     } catch (_) {}
-    await _saveAvg();
     notifyListeners();
-    if (!_userDisconnect && _device != null) {
-      final d = _device!;
-      Future.delayed(const Duration(seconds: 2), () {
-        if (link == LinkState.idle && !_userDisconnect) connect(d, name: deviceName);
-      });
+    if (!_userDisconnect) {
+      await SystemBridge.updateService('M365 · связь потеряна', 'Переподключаюсь…');
+      _scheduleReconnect();
     }
   }
 
-  Future<void> _saveAvg() async {
-    final a = trip.avgWhKm;
-    if (a != null && trip.km >= 1.0 && a > 3 && a < 60) {
-      savedAvgWhKm = savedAvgWhKm * 0.6 + a * 0.4;
-      final p = await SharedPreferences.getInstance();
-      await p.setDouble('avgWhKm', savedAvgWhKm);
+  void _scheduleReconnect() {
+    final d = _device;
+    if (d == null || _userDisconnect || !_wasConnected) return;
+    final since = _disconnectedAt ?? DateTime.now();
+    final away = DateTime.now().difference(since);
+    if (away > const Duration(minutes: 10)) {
+      // Долго нет связи — отпускаем фоновую службу, но иногда пробуем снова.
+      SystemBridge.stopService();
     }
+    final delay = away < const Duration(minutes: 1) ? const Duration(seconds: 3) : const Duration(seconds: 30);
+    Future.delayed(delay, () {
+      if (link == LinkState.idle && !_userDisconnect) connect(d, name: deviceName);
+    });
   }
 
-  void newTrip() {
-    _saveAvg();
-    trip.reset();
-    notifyListeners();
+  void _startNotifTimer() {
+    _notifTimer?.cancel();
+    _notifTimer = Timer.periodic(const Duration(seconds: 2), (_) => _updateNotification());
+  }
+
+  void _updateNotification() {
+    if (link != LinkState.connected) return;
+    final b = brain;
+    final title = dataFlowing ? '${speed.toStringAsFixed(0)} км/ч · $batteryPct%' : 'M365 · ${authStatus ?? 'подключено'}';
+    final parts = <String>[];
+    final t = b.trip;
+    if (t != null) {
+      parts.add('${t.km.toStringAsFixed(1)} км');
+      final a = t.avgWhKm;
+      if (a != null) parts.add('${a.toStringAsFixed(1)} Вт·ч/км');
+    }
+    final r = b.rangeKm;
+    if (r != null) parts.add('запас ~${r.toStringAsFixed(0)} км');
+    SystemBridge.updateService(title, parts.isEmpty ? (deviceName ?? 'Подключено') : parts.join(' · '));
   }
 
   // ---- опрос: строго запрос → ответ ----
-  void _queueOneShots() {
-    _oneShot
-      ..clear()
-      ..addAll([
-        readRequest(Addr.esc, 0x1A, 2), // прошивка контроллера
-        readRequest(Addr.bms, 0x17, 2), // прошивка BMS
-        readRequest(Addr.bms, 0x18, 2), // заводская ёмкость, мАч
-        readRequest(Addr.bms, 0x1B, 4), // циклы, количество зарядок
-        readRequest(Addr.esc, 0x7B, 6), // рекуперация, круиз, фонарь
-      ]);
+
+  static String _needKey(int addr, int arg) => '$addr:$arg';
+
+  void _need(int addr, int arg, int len) {
+    _needs[_needKey(addr, arg)] = _Need(readRequest(addr, arg, len));
+  }
+
+  void _satisfied(int replyAddr, int arg) {
+    final addr = replyAddr == Addr.escReply ? Addr.esc : Addr.bms;
+    _needs.remove(_needKey(addr, arg));
+  }
+
+  Uint8List? _nextNeed() {
+    if (_needs.isEmpty) return null;
+    final keys = _needs.keys.toList();
+    final k = keys[_needCursor % keys.length];
+    _needCursor++;
+    final n = _needs[k]!;
+    n.tries++;
+    if (n.tries > 8) _needs.remove(k);
+    return n.req;
   }
 
   void _startPolling() {
     _stopPolling();
-    _queueOneShots();
+    _needs.clear();
+    _need(Addr.esc, 0x1A, 2); // прошивка контроллера
+    _need(Addr.bms, 0x17, 2); // прошивка BMS
+    _need(Addr.bms, 0x18, 2); // заводская ёмкость, мАч
+    _need(Addr.bms, 0x1B, 4); // циклы, количество зарядок
+    _need(Addr.esc, 0x7B, 6); // рекуперация, круиз, фонарь
+    _lastChargeCountReq = DateTime.now();
     _pollStep = 0;
     final gen = ++_pollGen;
     unawaited(_pollLoop(gen));
@@ -542,27 +634,30 @@ class ScooterService extends ChangeNotifier {
   Future<void> _pollLoop(int gen) async {
     final startedAt = DateTime.now();
     while (gen == _pollGen && link == LinkState.connected) {
+      if (DateTime.now().difference(_lastChargeCountReq) > const Duration(seconds: 60)) {
+        _lastChargeCountReq = DateTime.now();
+        _need(Addr.bms, 0x1B, 4);
+      }
       Uint8List req;
-      if (_oneShot.isNotEmpty && _pollStep % 4 == 3) {
-        req = _oneShot.removeAt(0);
-      } else {
-        switch (_pollStep % 4) {
-          case 0:
-          case 2:
-            req = readRequest(Addr.esc, 0xB0, 0x20);
-            break;
-          case 1:
-            req = readRequest(Addr.bms, 0x31, 0x0A);
-            break;
-          default:
-            req = readRequest(Addr.bms, 0x40, 0x14);
-        }
+      // Ток BMS — каждый второй запрос (~2 раза в секунду), остальное — контроллер, ячейки, разовые.
+      switch (_pollStep % 6) {
+        case 1:
+        case 3:
+        case 5:
+          req = readRequest(Addr.bms, 0x31, 0x0A);
+          break;
+        case 4:
+          final n = (_pollStep ~/ 6).isEven ? _nextNeed() : null;
+          req = n ?? readRequest(Addr.bms, 0x40, 0x14);
+          break;
+        default:
+          req = readRequest(Addr.esc, 0xB0, 0x20);
       }
       _pollStep++;
       _pending = Completer<void>();
       await _send(req);
       await _pending!.future.timeout(const Duration(milliseconds: 500), onTimeout: () {});
-      await Future.delayed(const Duration(milliseconds: 40));
+      await Future.delayed(const Duration(milliseconds: 30));
 
       final silentFor = DateTime.now().difference(lastRx ?? startedAt);
       final nr = silentFor > const Duration(seconds: 5);
@@ -605,21 +700,21 @@ class ScooterService extends ChangeNotifier {
   Future<void> setKers(int level) async {
     await _send(writeRequest(Addr.esc, 0x7B, level));
     kers = level;
-    _oneShot.add(readRequest(Addr.esc, 0x7B, 6));
+    _need(Addr.esc, 0x7B, 6);
     notifyListeners();
   }
 
   Future<void> setCruise(bool on) async {
     await _send(writeRequest(Addr.esc, 0x7C, on ? 1 : 0));
     cruise = on;
-    _oneShot.add(readRequest(Addr.esc, 0x7B, 6));
+    _need(Addr.esc, 0x7B, 6);
     notifyListeners();
   }
 
   Future<void> setTailLight(bool on) async {
     await _send(writeRequest(Addr.esc, 0x7D, on ? 2 : 0));
     tailLight = on;
-    _oneShot.add(readRequest(Addr.esc, 0x7B, 6));
+    _need(Addr.esc, 0x7B, 6);
     notifyListeners();
   }
 
@@ -663,14 +758,19 @@ class ScooterService extends ChangeNotifier {
         speed = s16(d, 10) / 1000.0;
         totalKm = (u16(d, 14) | (u16(d, 16) << 16)) / 1000.0;
         frameTemp = s16(d, 22) / 10.0;
+        brain.onEsc(speed, totalKm, mode);
         break;
       case 0x1A:
-        if (d.length >= 2) escFw = fwString(u16(d, 0));
+        if (d.length >= 2) {
+          escFw = fwString(u16(d, 0));
+          _satisfied(f.addr, f.arg);
+        }
         break;
       case 0x7B:
         if (d.length >= 2) kers = u16(d, 0);
         if (d.length >= 4) cruise = u16(d, 2) != 0;
         if (d.length >= 6) tailLight = u16(d, 4) != 0;
+        _satisfied(f.addr, f.arg);
         break;
     }
   }
@@ -688,28 +788,42 @@ class ScooterService extends ChangeNotifier {
         temp2 = d[9] - 20;
         _detectSign(rawCurrent);
         current = rawCurrent * _currentSign;
-        trip.update(DateTime.now(), power, speed);
+        brain.onBms(voltage, current, remainingMah, bmsPct);
         break;
       case 0x40:
         final n = (d.length ~/ 2).clamp(0, 10);
         cells = [for (var i = 0; i < n; i++) u16(d, i * 2) / 1000.0].where((v) => v > 1).toList();
+        if (cells.isNotEmpty) brain.minCell = cells.reduce((a, b) => a < b ? a : b);
         break;
       case 0x17:
-        if (d.length >= 2) bmsFw = fwString(u16(d, 0));
+        if (d.length >= 2) {
+          bmsFw = fwString(u16(d, 0));
+          _satisfied(f.addr, f.arg);
+        }
         break;
       case 0x18:
         if (d.length >= 2) {
           final v = u16(d, 0);
-          if (v > 1000) factoryMah = v;
+          if (v > 1000) {
+            factoryMah = v;
+            brain.onFactoryMah(v);
+          }
+          _satisfied(f.addr, f.arg);
         }
         break;
       case 0x1B:
         if (d.length >= 2) cycles = u16(d, 0);
-        if (d.length >= 4) chargeCount = u16(d, 2);
+        if (d.length >= 4) {
+          chargeCount = u16(d, 2);
+          brain.chargeCount = chargeCount;
+        }
+        _satisfied(f.addr, f.arg);
         break;
     }
   }
 
+  /// На ходу ток в основном тянет из батареи. Если при движении он почти всегда
+  /// отрицательный — у этой BMS знак обратный, переворачиваем и запоминаем.
   void _detectSign(double raw) {
     if (speed < 8 || raw.abs() < 1.5) return;
     _signVotes += raw * _currentSign > 0 ? 1 : -1;
@@ -718,7 +832,21 @@ class ScooterService extends ChangeNotifier {
       _currentSign = -_currentSign;
       _signVotes = 0;
       _log('**', 'знак тока перевёрнут');
+      brain.onSignFlip();
+      _saveSign();
+    } else if (_signVotes >= 20) {
+      _saveSign();
     }
+  }
+
+  bool _signSaved = false;
+  Future<void> _saveSign() async {
+    if (_signSaved) return;
+    final d = _device;
+    if (d == null) return;
+    _signSaved = true;
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('sign_${d.remoteId.str}', _currentSign);
   }
 
   static String _toHex(List<int> b) => b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();

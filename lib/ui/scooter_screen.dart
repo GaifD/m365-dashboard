@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../ble/scooter.dart';
 import '../theme.dart';
+import 'battery_screen.dart' show editTariff;
 import 'log_screen.dart';
 import 'widgets.dart';
 
@@ -12,7 +13,7 @@ class ScooterScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = ScooterService.instance;
     return AnimatedBuilder(
-      animation: s,
+      animation: Listenable.merge([s, s.brain]),
       builder: (context, _) {
         final connected = s.link == LinkState.connected;
         final busy = s.link == LinkState.connecting || s.link == LinkState.scanning;
@@ -158,15 +159,15 @@ class ScooterScreen extends StatelessWidget {
                       trailing: Wrap(
                         spacing: 6,
                         children: [
-                          IconButton(
-                            tooltip: 'Заблокировать',
+                          OutlinedButton.icon(
                             onPressed: s.dataFlowing ? s.lock : null,
-                            icon: const Icon(Icons.lock_outline),
+                            icon: const Icon(Icons.lock_outline, size: 18),
+                            label: const Text('Закрыть'),
                           ),
-                          IconButton(
-                            tooltip: 'Разблокировать',
+                          OutlinedButton.icon(
                             onPressed: s.dataFlowing ? s.unlock : null,
-                            icon: const Icon(Icons.lock_open),
+                            icon: const Icon(Icons.lock_open, size: 18),
+                            label: const Text('Открыть'),
                           ),
                         ],
                       ),
@@ -179,11 +180,51 @@ class ScooterScreen extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                 child: Column(
                   children: [
-                    const ListTile(
-                      title: Text('Экран не гаснет', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                      subtitle: Text('Пока самокат подключён', style: TextStyle(fontSize: 12, color: C.muted)),
-                      trailing: Icon(Icons.check, color: C.accent),
+                    ListTile(
+                      title: const Text('Работа в фоне', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                        s.batteryOptimizationOff
+                            ? 'Без ограничений — запись в кармане не прерывается'
+                            : 'Телефон ограничивает приложение. Нажми, чтобы снять. На Samsung также: '
+                                'Настройки → Приложения → M365 Dashboard → Батарея → Не ограничено',
+                        style: const TextStyle(fontSize: 12, color: C.muted, height: 1.35),
+                      ),
+                      trailing: Icon(
+                        s.batteryOptimizationOff ? Icons.check : Icons.battery_alert,
+                        color: s.batteryOptimizationOff ? C.accent : C.amber,
+                      ),
+                      onTap: s.batteryOptimizationOff ? s.refreshBatteryOptimization : s.requestBatteryOptimizationOff,
                     ),
+                    SwitchListTile(
+                      title: const Text('Экран не гаснет', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: const Text('Пока самокат подключён. Для крепления на руль; в кармане лучше выключить',
+                          style: TextStyle(fontSize: 12, color: C.muted)),
+                      value: s.keepScreenOn,
+                      onChanged: s.setKeepScreenOn,
+                    ),
+                    const ListTile(
+                      title: Text('Экран блокировки', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                          'Пока самокат подключён, кнопка питания показывает спидометр без разблокировки '
+                          '(если приложение было открыто, когда гас экран)',
+                          style: TextStyle(fontSize: 12, color: C.muted, height: 1.35)),
+                    ),
+                    ListTile(
+                      title: const Text('Тариф на электричество',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                          s.brain.tariff == null ? 'Не задан' : '${s.brain.tariff} грн за кВт·ч',
+                          style: const TextStyle(fontSize: 12, color: C.muted)),
+                      trailing: const Icon(Icons.edit_outlined, color: C.faint, size: 20),
+                      onTap: () => editTariff(context),
+                    ),
+                    if (connected)
+                      ListTile(
+                        title: const Text('Режим (код)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                        subtitle: const Text('Для проверки: переключи режим на самокате и посмотри, как меняется код',
+                            style: TextStyle(fontSize: 12, color: C.muted)),
+                        trailing: Text('${s.mode}', style: numStyle(18)),
+                      ),
                     const ListTile(
                       title: Text('Колёса', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                       subtitle: Text('8.5″ стандарт · коэффициент 1.00', style: TextStyle(fontSize: 12, color: C.muted)),
@@ -199,7 +240,7 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.2', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.3', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );
