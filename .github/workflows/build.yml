@@ -73,6 +73,17 @@ jobs:
           echo "::error title=errors::$(printf '%s' "$ERR" | enc)"
           echo "::error title=tail::$(printf '%s' "$TAIL" | enc)"
 
+      - name: Debug native layer
+        run: |
+          {
+            echo "kotlin files:"; find android/app/src/main -name "*.kt" -o -name "*.java" | grep -v build/
+            echo "namespace:"; grep -n "namespace\|applicationId" android/app/build.gradle.kts
+            echo "manifest activity:"; grep -n "activity\|service" android/app/src/main/AndroidManifest.xml
+            echo "dex has channel:"; unzip -p build/app/outputs/flutter-apk/app-release.apk 'classes*.dex' | strings | grep -c "m365/system" || true
+            echo "dex RideService:"; unzip -p build/app/outputs/flutter-apk/app-release.apk 'classes*.dex' | strings | grep -m3 "RideService" || true
+          } > native.txt 2>&1
+          python3 -c 'import sys; s=open("native.txt").read(); print("::notice title=native::"+s.replace("%","%25").replace("\n","%0A"))'
+
       - name: Signing certificate
         run: |
           APKSIGNER=$(ls -d $ANDROID_SDK_ROOT/build-tools/*/apksigner | sort -V | tail -1)
