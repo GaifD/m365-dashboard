@@ -55,11 +55,6 @@ jobs:
               https://raw.githubusercontent.com/google/fonts/main/ofl/chakrapetch/ChakraPetch-$w.ttf
           done
 
-      - name: Stable signing key (so updates install over the old version)
-        run: |
-          mkdir -p ~/.android
-          cp tool/debug.keystore ~/.android/debug.keystore
-
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
       - name: Build APK
@@ -77,6 +72,12 @@ jobs:
           enc() { python3 -c 'import sys; s=sys.stdin.read()[-15000:]; print(s.replace("%","%25").replace("\r","").replace("\n","%0A"))'; }
           echo "::error title=errors::$(printf '%s' "$ERR" | enc)"
           echo "::error title=tail::$(printf '%s' "$TAIL" | enc)"
+
+      - name: Signing certificate
+        run: |
+          APKSIGNER=$(ls -d $ANDROID_SDK_ROOT/build-tools/*/apksigner | sort -V | tail -1)
+          $APKSIGNER verify --print-certs build/app/outputs/flutter-apk/app-release.apk | grep -i "SHA-256" | tee cert.txt
+          echo "::notice title=cert::$(cat cert.txt)"
 
       - name: Rename APK
         run: |

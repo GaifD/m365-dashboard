@@ -69,3 +69,27 @@ subprojects {{
     g = (g[:idx] + snippet.lstrip("\n") + "\n" + g[idx:]) if idx >= 0 else (g + snippet)
     root_gradle.write_text(g, encoding="utf-8")
     print("build.gradle.kts patched")
+
+# Постоянный ключ подписи: без него каждая сборка подписывается новым случайным
+# ключом, и обновление не ставится поверх старой версии.
+app_gradle = pathlib.Path("android/app/build.gradle.kts")
+ag = app_gradle.read_text(encoding="utf-8")
+if 'create("stable")' not in ag:
+    signing = '''    signingConfigs {
+        create("stable") {
+            storeFile = file("../../tool/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
+'''
+    idx = ag.find("    buildTypes {")
+    assert idx >= 0, "buildTypes not found in app/build.gradle.kts"
+    ag = ag[:idx] + signing + ag[idx:]
+    assert 'signingConfig = signingConfigs.getByName("debug")' in ag, "release signingConfig line not found"
+    ag = ag.replace('signingConfig = signingConfigs.getByName("debug")',
+                    'signingConfig = signingConfigs.getByName("stable")')
+    app_gradle.write_text(ag, encoding="utf-8")
+    print("app/build.gradle.kts: stable signing")
