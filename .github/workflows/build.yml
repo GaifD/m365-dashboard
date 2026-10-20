@@ -99,3 +99,5 @@ jobs:
         with:
           name: m365-dashboard-apk
           path: m365-dashboard-v*.apk
+          retention-days: 14
+          if-no-files-found: error
