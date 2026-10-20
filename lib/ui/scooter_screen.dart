@@ -38,7 +38,9 @@ class ScooterScreen extends StatelessWidget {
                                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                               const SizedBox(height: 2),
                               Text(
-                                connected ? 'Пробег ${s.totalKm.toStringAsFixed(1)} км' : (s.statusText ?? 'Не подключён'),
+                                connected
+                                    ? 'Пробег ${s.totalKm.toStringAsFixed(1)} км · режим ${ScooterService.modeName(s.mode)}'
+                                    : (s.statusText ?? 'Не подключён'),
                                 style: const TextStyle(fontSize: 12, color: C.muted),
                               ),
                             ],
@@ -257,7 +259,7 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.3.2', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.3.3', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );

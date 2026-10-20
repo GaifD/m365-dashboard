@@ -239,6 +239,19 @@ class _Header extends StatelessWidget {
               ),
             ),
             if (connected) ...[
+              if (s.mode >= 0) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(99),
+                    border: Border.all(color: s.mode == 2 ? C.amber : C.accent),
+                  ),
+                  child: Text(ScooterService.modeShort(s.mode),
+                      style: TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.w700, color: s.mode == 2 ? C.amber : C.accent)),
+                ),
+                const SizedBox(width: 12),
+              ],
               const Icon(Icons.thermostat, size: 16, color: C.textSoft),
               Text('${s.temp1}°', style: const TextStyle(fontSize: 13, color: C.textSoft)),
               const SizedBox(width: 14),

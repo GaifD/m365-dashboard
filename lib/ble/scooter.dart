@@ -116,7 +116,10 @@ class ScooterService extends ChangeNotifier {
   int escBattery = 0;
   int errorCode = 0;
   int warningCode = 0;
-  int mode = 0;
+  int mode = -1; // регистр 0x75: 0 драйв, 1 эко, 2 спорт
+  static String modeName(int m) => switch (m) { 0 => 'Драйв', 1 => 'Эко', 2 => 'Спорт', _ => '—' };
+  static String modeShort(int m) => switch (m) { 0 => 'D', 1 => 'ECO', 2 => 'S', _ => '' };
+  DateTime _lastModeReq = DateTime.fromMillisecondsSinceEpoch(0);
   double totalKm = 0;
   double frameTemp = 0;
   String? escFw;
@@ -689,6 +692,10 @@ class ScooterService extends ChangeNotifier {
   Future<void> _pollLoop(int gen) async {
     final startedAt = DateTime.now();
     while (gen == _pollGen && link == LinkState.connected) {
+      if (DateTime.now().difference(_lastModeReq) > const Duration(seconds: 4)) {
+        _lastModeReq = DateTime.now();
+        _need(Addr.esc, 0x75, 2);
+      }
       if (DateTime.now().difference(_lastChargeCountReq) > const Duration(seconds: 60)) {
         _lastChargeCountReq = DateTime.now();
         _need(Addr.bms, 0x1B, 4);
@@ -702,7 +709,7 @@ class ScooterService extends ChangeNotifier {
           req = readRequest(Addr.bms, 0x31, 0x0A);
           break;
         case 4:
-          final n = (_pollStep ~/ 6).isEven ? _nextNeed() : null;
+          final n = _nextNeed();
           req = n ?? readRequest(Addr.bms, 0x40, 0x14);
           break;
         case 2:
@@ -814,12 +821,18 @@ class ScooterService extends ChangeNotifier {
         if (d.length < 24) return;
         errorCode = u16(d, 0);
         warningCode = u16(d, 2);
-        mode = u16(d, 6);
         escBattery = u16(d, 8);
         speed = s16(d, 10) / 1000.0;
         totalKm = (u16(d, 14) | (u16(d, 16) << 16)) / 1000.0;
         frameTemp = s16(d, 22) / 10.0;
         brain.onEsc(speed, totalKm, mode);
+        break;
+      case 0x75:
+        if (d.length >= 2) {
+          final m = u16(d, 0);
+          if (m <= 2) mode = m;
+          _satisfied(f.addr, f.arg);
+        }
         break;
       case 0x1A:
         if (d.length >= 2) {
