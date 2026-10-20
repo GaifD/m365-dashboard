@@ -80,13 +80,15 @@ class BatteryScreen extends StatelessWidget {
                             const SizedBox(height: 4),
                             Text(
                               rawDiff
-                                  ? 'BMS сейчас: ${s.bmsPct}% — просадка под нагрузкой'
+                                  ? (s.current < -0.3
+                                      ? 'BMS сейчас: ${s.bmsPct}% — завышено на зарядке'
+                                      : 'BMS сейчас: ${s.bmsPct}% — просадка под нагрузкой')
                                   : '${s.remainingMah} мАч по BMS',
                               style: const TextStyle(fontSize: 13, color: C.muted),
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              'Циклов: ${s.cycles ?? '—'} · зарядок: ${s.chargeCount ?? '—'}',
+                              'Полных циклов: ${s.cycles ?? '—'} · зарядок: ${s.chargeCount ?? '—'}',
                               style: const TextStyle(fontSize: 13, color: C.muted),
                             ),
                           ],
@@ -280,8 +282,10 @@ class _ChargesCard extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(right: 8, bottom: 10),
               child: Banner2(
-                text: 'Идёт зарядка: +${lc.wh.toStringAsFixed(0)} Вт·ч, +${(lc.ah * 1000).toStringAsFixed(0)} мАч '
-                    '(по BMS +${b.mah - lc.mahFrom} мАч)',
+                text: lc.suspendedAt != null
+                    ? 'Зарядка: связь пропала, запись продолжится при подключении'
+                    : 'Идёт зарядка: ${lc.approx ? '≈' : ''}+${lc.wh.toStringAsFixed(0)} Вт·ч, '
+                        '+${(lc.ah * 1000).toStringAsFixed(0)} мАч (по BMS ${signed(b.mah - lc.mahFrom)} мАч)',
                 color: C.accent,
                 icon: Icons.bolt,
               ),
@@ -312,6 +316,11 @@ class _ChargesCard extends StatelessWidget {
               ),
             ),
           for (final c in list) _ChargeTile(c: c, tariff: tariff),
+          if (list.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text('Удержи запись, чтобы удалить', style: TextStyle(fontSize: 11, color: C.faint)),
+            ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
@@ -343,9 +352,11 @@ class _ChargeTile extends StatelessWidget {
       if (c.live) 'записана целиком',
     ];
     final details = c.live && c.ahApp != null && c.mahBms != null
-        ? '\nприложение +${(c.ahApp! * 1000).toStringAsFixed(0)} мАч · BMS +${c.mahBms} мАч'
+        ? '\nприложение +${(c.ahApp! * 1000).toStringAsFixed(0)} мАч · BMS ${signed(c.mahBms!)} мАч'
         : '';
-    return Padding(
+    return InkWell(
+      onLongPress: () => _confirmDelete(context),
+      child: Padding(
       padding: const EdgeInsets.fromLTRB(0, 10, 8, 0),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -372,9 +383,33 @@ class _ChargeTile extends StatelessWidget {
           ),
         ],
       ),
+      ),
+    );
+  }
+
+  void _confirmDelete(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: C.surface,
+        title: const Text('Удалить запись зарядки?'),
+        content: Text('${fmtDate(c.t)}: ${c.pctFrom.toStringAsFixed(0)}% → ${c.pctTo.toStringAsFixed(0)}%'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          TextButton(
+            onPressed: () {
+              ScooterService.instance.brain.deleteCharge(c);
+              Navigator.pop(ctx);
+            },
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
     );
   }
 }
+
+String signed(int v) => v >= 0 ? '+$v' : '−${-v}';
 
 class _CellBars extends StatelessWidget {
   final List<double> cells;

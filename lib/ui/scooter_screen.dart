@@ -4,6 +4,7 @@ import '../ble/scooter.dart';
 import '../theme.dart';
 import 'battery_screen.dart' show editTariff;
 import 'log_screen.dart';
+import 'mode_scan_screen.dart';
 import 'widgets.dart';
 
 class ScooterScreen extends StatelessWidget {
@@ -234,13 +235,13 @@ class ScooterScreen extends StatelessWidget {
                       trailing: const Icon(Icons.edit_outlined, color: C.faint, size: 20),
                       onTap: () => editTariff(context),
                     ),
-                    if (connected)
-                      ListTile(
-                        title: const Text('Режим (код)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                        subtitle: const Text('Для проверки: переключи режим на самокате и посмотри, как меняется код',
-                            style: TextStyle(fontSize: 12, color: C.muted)),
-                        trailing: Text('${s.mode}', style: numStyle(18)),
-                      ),
+                    ListTile(
+                      title: const Text('Поиск кода режима', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: const Text('Помоги найти, где самокат хранит режим ЭКО/драйв/спорт',
+                          style: TextStyle(fontSize: 12, color: C.muted)),
+                      trailing: const Icon(Icons.chevron_right, color: C.faint),
+                      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ModeScanScreen())),
+                    ),
                     const ListTile(
                       title: Text('Колёса', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                       subtitle: Text('8.5″ стандарт · коэффициент 1.00', style: TextStyle(fontSize: 12, color: C.muted)),
@@ -256,7 +257,7 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.3.1', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.3.2', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );

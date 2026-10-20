@@ -54,7 +54,34 @@ class LiveCharge {
   final int mahFrom;
   double wh = 0;
   double ah = 0;
+  bool approx = false; // был кусок без связи, досчитан по току × время
+  DateTime? suspendedAt; // связь пропала, запись ждёт продолжения
   LiveCharge(this.start, this.pctFrom, this.mahFrom);
+
+  Map<String, dynamic> toJson() => {
+        'start': start.millisecondsSinceEpoch,
+        'p0': pctFrom,
+        'mah0': mahFrom,
+        'wh': wh,
+        'ah': ah,
+        'approx': approx,
+        'susp': suspendedAt?.millisecondsSinceEpoch,
+      };
+
+  static LiveCharge? fromJson(dynamic j) {
+    if (j is! Map || j['start'] is! num) return null;
+    final lc = LiveCharge(
+      DateTime.fromMillisecondsSinceEpoch((j['start'] as num).toInt()),
+      (j['p0'] as num?)?.toDouble() ?? 0,
+      (j['mah0'] as num?)?.toInt() ?? 0,
+    );
+    lc.wh = (j['wh'] as num?)?.toDouble() ?? 0;
+    lc.ah = (j['ah'] as num?)?.toDouble() ?? 0;
+    lc.approx = j['approx'] == true;
+    final su = j['susp'];
+    lc.suspendedAt = su is num ? DateTime.fromMillisecondsSinceEpoch(su.toInt()) : DateTime.now();
+    return lc;
+  }
 }
 
 double _r(double v, int digits) {
@@ -182,7 +209,8 @@ class Brain extends ChangeNotifier {
   void detach() {
     if (!connected) return;
     connected = false;
-    _finishLiveCharge();
+    final lc = liveCharge;
+    if (lc != null) lc.suspendedAt = DateTime.now();
     final t = trip;
     if (t != null) t.suspendedAt = DateTime.now();
     if (!_needConnectCheck) lastSeen = _snap(false);
@@ -251,7 +279,7 @@ class Brain extends ChangeNotifier {
           if (dWh < 0) t.regen += -dWh;
         }
         final lc = liveCharge;
-        if (lc != null) {
+        if (lc != null && lc.suspendedAt == null) {
           lc.wh += -dWh;
           lc.ah += -dAh;
         }
@@ -383,7 +411,7 @@ class Brain extends ChangeNotifier {
       _chargeSince ??= now;
       if (liveCharge == null && now.difference(_chargeSince!) >= const Duration(seconds: 30)) {
         liveCharge = LiveCharge(_chargeSince!, honestPct ?? bmsPct, mah);
-        dirtyCap = true;
+        _saveState();
         notifyListeners();
       }
     } else {
@@ -411,14 +439,15 @@ class Brain extends ChangeNotifier {
         pctTo: honestPct ?? bmsPct,
         batteryWh: lc.wh,
         count: 1,
-        approx: false,
+        approx: lc.approx,
         durationSec: DateTime.now().difference(lc.start).inSeconds,
         ahApp: lc.ah,
         mahBms: mah - lc.mahFrom,
       ),
     );
-    dirtyCap = true;
+    if (lc.approx) dirtyCap = true;
     _saveCharges();
+    _saveState();
     notifyListeners();
   }
 
@@ -439,15 +468,17 @@ class Brain extends ChangeNotifier {
     socValid = true;
 
     final c = capAnchor;
-    if (c == null || dirtyCap || bmsPct > c.bmsPct + 2) {
+    if (c == null || dirtyCap) {
       capAnchor = rested;
       dirtyCap = false;
     } else {
-      final dPct = c.bmsPct - bmsPct;
+      // Между двумя состояниями покоя: сколько процентов ушло/пришло и сколько энергии
+      // насчитал счётчик приложения (поездки и зарядки, записанные целиком).
+      final dPct = c.bmsPct - bmsPct; // > 0 — разряд, < 0 — зарядка
       final wh = cumWh - c.cumWh;
       final ah = cumAh - c.cumAh;
       final dMah = (c.mah - mah).toDouble();
-      if (dPct >= 15 && wh > 0 && ah > 0) {
+      if (dPct.abs() >= 15 && wh * dPct > 0 && ah * dPct > 0) {
         capacity.add(CapacitySample(
           t: now,
           dPct: dPct,
@@ -479,8 +510,37 @@ class Brain extends ChangeNotifier {
     _needConnectCheck = false;
     final now = DateTime.now();
     final prev = lastSeen;
-    final rested = prev == null || now.difference(prev.t) >= restAfter;
+    final chargingNow = current < -0.3 && speed < 0.5;
+    final rested = (prev == null || now.difference(prev.t) >= restAfter) && current.abs() < 0.3;
     final odoDelta = (prev != null && prev.odo > 0 && odo > 0) ? odo - prev.odo : 0.0;
+
+    // Зарядка, записанная до обрыва связи.
+    final lc = liveCharge;
+    var liveCovered = false;
+    if (lc != null && lc.suspendedAt != null) {
+      liveCovered = true;
+      final gapH = now.difference(lc.suspendedAt!).inSeconds / 3600.0;
+      if (chargingNow) {
+        // Зарядка ещё идёт — продолжаем ту же запись, пропуск досчитываем по току × время.
+        final gapAh = current.abs() * gapH;
+        lc.ah += gapAh;
+        lc.wh += gapAh * voltage;
+        if (gapH > 0.01) lc.approx = true;
+        lc.suspendedAt = null;
+        lastSeen = _snap(false);
+        _saveState();
+        notifyListeners();
+        return;
+      }
+      // Зарядка закончилась, пока связи не было: досчитываем по разнице процентов.
+      final rise = bmsPct - (lc.pctFrom + lc.ah * 1000.0 * kBms / (lc.mahFrom > 0 && lc.pctFrom > 5 ? lc.mahFrom / lc.pctFrom : factoryMah / 100.0));
+      if (rise > 0 && gapH > 0.01) {
+        lc.wh += rise * whPerPct;
+        lc.approx = true;
+      }
+      lc.suspendedAt = null;
+      _finishLiveCharge();
+    }
 
     // Продолжение прерванной поездки.
     final t = trip;
@@ -502,7 +562,7 @@ class Brain extends ChangeNotifier {
       final pcc = prev.chargeCount;
       final dCount = (cc != null && pcc != null) ? cc - pcc : 0;
       final rise = bmsPct - prev.pct;
-      if (dCount > 0 || (rise >= 5 && mah - prev.mah > 500)) {
+      if (!liveCovered && !chargingNow && (dCount > 0 || (rise >= 5 && mah - prev.mah > 500))) {
         charged = true;
         charges.insert(
           0,
@@ -538,6 +598,10 @@ class Brain extends ChangeNotifier {
         dirtyCap = true;
       }
       if ((charged || odoDelta > 0.2) && !rested) socValid = false;
+    }
+    if (chargingNow && liveCharge == null) {
+      liveCharge = LiveCharge(now, honestPct ?? bmsPct, mah);
+      if (prev != null && bmsPct > prev.pct + 1) liveCharge!.approx = true;
     }
     if (rested) {
       _takeAnchor(now);
@@ -590,6 +654,12 @@ class Brain extends ChangeNotifier {
       _connectCheck();
     }
 
+    final lcs = liveCharge;
+    if (lcs != null && lcs.suspendedAt != null && now.difference(lcs.suspendedAt!) > const Duration(hours: 12)) {
+      lcs.approx = true;
+      lcs.suspendedAt = null;
+      _finishLiveCharge();
+    }
     final t = trip;
     if (t != null && t.suspendedAt != null) {
       if (now.difference(t.suspendedAt!) > resumeWindow) _finishTrip();
@@ -707,6 +777,12 @@ class Brain extends ChangeNotifier {
     ];
   }
 
+  Future<void> deleteCharge(ChargeRecord c) async {
+    charges.remove(c);
+    await _saveCharges();
+    notifyListeners();
+  }
+
   Future<void> deleteTrip(TripRecord r) async {
     trips.removeWhere((x) => x.id == r.id);
     final s = _store;
@@ -731,6 +807,7 @@ class Brain extends ChangeNotifier {
       final cap = st['capacity'];
       capacity = cap is List ? cap.map(CapacitySample.fromJson).whereType<CapacitySample>().toList() : [];
       if (st['factoryMah'] is num) factoryMah = (st['factoryMah'] as num).toInt();
+      liveCharge = LiveCharge.fromJson(st['liveCharge']);
       _relearn();
     } else {
       cumWh = 0;
@@ -774,6 +851,7 @@ class Brain extends ChangeNotifier {
       'capAnchor': capAnchor?.toJson(),
       'capacity': capacity.map((c) => c.toJson()).toList(),
       'factoryMah': factoryMah,
+      'liveCharge': liveCharge?.toJson(),
     });
   }
 

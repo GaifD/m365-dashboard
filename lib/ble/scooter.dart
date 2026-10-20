@@ -70,6 +70,41 @@ class ScooterService extends ChangeNotifier {
   List<ScanResult> scanResults = [];
   bool noReply = false;
 
+  // ---- поиск кода режима ----
+  bool modeScan = false;
+  final Map<int, int> _scanLast = {};
+  final Map<int, List<int>> scanChanges = {};
+  int _scanChunk = 0;
+
+  void startModeScan() {
+    modeScan = true;
+    _scanLast.clear();
+    scanChanges.clear();
+    _scanChunk = 0;
+    _log('**', 'поиск режима: старт');
+    notifyListeners();
+  }
+
+  void stopModeScan() {
+    modeScan = false;
+    _log('**', 'поиск режима: стоп');
+    notifyListeners();
+  }
+
+  void _scanRecord(int base, List<int> d) {
+    for (var i = 0; i + 1 < d.length; i += 2) {
+      final reg = base + i ~/ 2;
+      final v = u16(d, i);
+      final prev = _scanLast[reg];
+      if (prev != null && prev != v) {
+        final list = scanChanges.putIfAbsent(reg, () => [prev]);
+        if (list.length < 40) list.add(v);
+        if (list.length <= 12) _log('**', 'рег 0x${reg.toRadixString(16).padLeft(2, '0')}: $prev → $v');
+      }
+      _scanLast[reg] = v;
+    }
+  }
+
   // ---- настройки приложения ----
   bool keepScreenOn = false;
   bool batteryOptimizationOff = true;
@@ -670,6 +705,11 @@ class ScooterService extends ChangeNotifier {
           final n = (_pollStep ~/ 6).isEven ? _nextNeed() : null;
           req = n ?? readRequest(Addr.bms, 0x40, 0x14);
           break;
+        case 2:
+          req = modeScan
+              ? readRequest(Addr.esc, (_scanChunk++ % 16) * 0x10, 0x20)
+              : readRequest(Addr.esc, 0xB0, 0x20);
+          break;
         default:
           req = readRequest(Addr.esc, 0xB0, 0x20);
       }
@@ -768,6 +808,7 @@ class ScooterService extends ChangeNotifier {
 
   void _handleEsc(NbFrame f) {
     final d = f.data;
+    if (modeScan) _scanRecord(f.arg, d);
     switch (f.arg) {
       case 0xB0:
         if (d.length < 24) return;
