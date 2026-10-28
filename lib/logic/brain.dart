@@ -588,6 +588,50 @@ class Brain extends ChangeNotifier {
     notifyListeners();
   }
 
+  static List<CapacitySample> _mergeShortSamples(List<CapacitySample> list) {
+    final out = <CapacitySample>[];
+    final run = <CapacitySample>[];
+    void flush() {
+      if (run.isEmpty) return;
+      var dp = 0.0, wh = 0.0, ah = 0.0, mah = 0.0;
+      for (final c in run) {
+        dp += c.dPct;
+        wh += c.capWh * c.dPct / 100.0;
+        ah += c.capAhApp * c.dPct / 100.0;
+        mah += c.capMahBms * c.dPct / 100.0;
+      }
+      if (dp.abs() >= minCapSpan && ah != 0) {
+        out.add(CapacitySample(
+          t: run.last.t,
+          dPct: dp,
+          capWh: wh / dp * 100.0,
+          capAhApp: ah / dp * 100.0,
+          capMahBms: mah / dp * 100.0,
+          k: mah / (ah * 1000.0),
+        ));
+      }
+      run.clear();
+    }
+
+    for (final c in list) {
+      if (c.dPct.abs() >= minCapSpan) {
+        flush();
+        out.add(c);
+        continue;
+      }
+      if (run.isNotEmpty &&
+          (run.last.dPct > 0) != (c.dPct > 0) ||
+          run.isNotEmpty && c.t.difference(run.last.t) > const Duration(hours: 72)) {
+        flush();
+      }
+      run.add(c);
+      final span = run.fold<double>(0, (a, b) => a + b.dPct).abs();
+      if (span >= minCapSpan) flush();
+    }
+    flush();
+    return out;
+  }
+
   void _relearn() {
     if (capacity.isEmpty) return;
     final wh = _median(capacity.map((c) => c.capWh).toList());
@@ -901,8 +945,10 @@ class Brain extends ChangeNotifier {
       capAnchor = Snapshot.fromJson(st['capAnchor']);
       final cap = st['capacity'];
       capacity = cap is List ? cap.map(CapacitySample.fromJson).whereType<CapacitySample>().toList() : [];
-      // Замеры по короткому куску шкалы ненадёжны (проценты BMS неравномерны) — отбрасываем.
-      capacity.removeWhere((c) => c.dPct.abs() < minCapSpan);
+      // Замеры по короткому куску шкалы ненадёжны (проценты BMS неравномерны).
+      // Версии до 0.4 резали один разряд на куски по 15–25% — склеиваем подряд идущие
+      // куски одного направления в один длинный замер, остальные короткие отбрасываем.
+      capacity = _mergeShortSamples(capacity);
       cells.loadJson(st['cells']);
       if (st['factoryMah'] is num) factoryMah = (st['factoryMah'] as num).toInt();
       liveCharge = LiveCharge.fromJson(st['liveCharge']);

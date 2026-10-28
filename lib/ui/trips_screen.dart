@@ -278,7 +278,7 @@ class _AnalyticsSectionState extends State<_AnalyticsSection> {
                   onChanged: (_) => setState(() {}),
                   style: numStyle(22),
                   decoration: const InputDecoration(
-                    labelText: 'Расстояние',
+                    hintText: '0',
                     suffixText: 'км',
                     isDense: true,
                     border: OutlineInputBorder(),

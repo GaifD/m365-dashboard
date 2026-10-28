@@ -5,7 +5,7 @@
 class BinCell {
   double wh = 0;
   double km = 0;
-  double? get whKm => km >= 0.3 ? wh / km : null;
+  double? get whKm => km >= 1.0 ? wh / km : null;
 }
 
 class SpeedTable {

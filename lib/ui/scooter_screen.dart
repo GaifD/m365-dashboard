@@ -259,7 +259,7 @@ class ScooterScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              const Center(child: Text('M365 Dashboard v0.4', style: TextStyle(fontSize: 11, color: C.faint))),
+              const Center(child: Text('M365 Dashboard v0.4.1', style: TextStyle(fontSize: 11, color: C.faint))),
             ],
           ),
         );
