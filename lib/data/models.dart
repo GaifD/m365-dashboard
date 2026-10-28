@@ -77,6 +77,10 @@ class TripRecord {
   final bool unrecorded; // поездка без приложения (по одометру)
   final bool whApprox;
   final bool hasSamples;
+  final int ver; // 2+ — режим записан из регистра 0x75 (раньше режим был неверный)
+  final int? smooth; // плавность 0..100
+  final int? hardStarts; // резких стартов
+  final double? hardWh; // энергия на резких разгонах
 
   const TripRecord({
     required this.id,
@@ -98,7 +102,13 @@ class TripRecord {
     required this.unrecorded,
     required this.whApprox,
     required this.hasSamples,
+    this.ver = 1,
+    this.smooth,
+    this.hardStarts,
+    this.hardWh,
   });
+
+  bool get modeOk => ver >= 2;
 
   double get effKm => km - gapKm;
 
@@ -133,6 +143,10 @@ class TripRecord {
         'unrec': unrecorded,
         'approx': whApprox,
         'samples': hasSamples,
+        'ver': ver,
+        'smooth': smooth,
+        'hard': hardStarts,
+        'hardWh': hardWh,
       };
 
   static TripRecord? fromJson(dynamic j) {
@@ -164,6 +178,10 @@ class TripRecord {
       unrecorded: j['unrec'] == true,
       whApprox: j['approx'] == true,
       hasSamples: j['samples'] == true,
+      ver: _in(j['ver']) ?? 1,
+      smooth: _in(j['smooth']),
+      hardStarts: _in(j['hard']),
+      hardWh: _dn(j['hardWh']),
     );
   }
 }

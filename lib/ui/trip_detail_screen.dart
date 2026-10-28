@@ -25,8 +25,26 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
   void initState() {
     super.initState();
     ScooterService.instance.brain.loadSamples(widget.trip).then((v) {
-      if (mounted) setState(() => _samples = v);
+      if (mounted) setState(() => _samples = _trim(v));
     });
+  }
+
+  /// Убираем хвост стоянки после последнего движения (3 минуты ожидания конца поездки).
+  static List<List<num>> _trim(List<List<num>> v) {
+    var last = -1;
+    for (var i = v.length - 1; i >= 0; i--) {
+      if (v[i][1] > 1) {
+        last = i;
+        break;
+      }
+    }
+    if (last < 0) return v;
+    final cutT = v[last][0] + 10;
+    var end = last;
+    while (end + 1 < v.length && v[end + 1][0] <= cutT) {
+      end++;
+    }
+    return v.sublist(0, end + 1);
   }
 
   List<double?> _values() {
@@ -109,6 +127,14 @@ class _TripDetailScreenState extends State<TripDetailScreen> {
               _Tile('Мин. ячейка', r.minCell == null ? '—' : r.minCell!.toStringAsFixed(2), 'В'),
             ],
           ),
+          if (r.smooth != null) ...[
+            const SizedBox(height: 10),
+            _SmoothCard(r),
+          ],
+          if (r.modeOk && r.modeSec.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _ModeSplit(r.modeSec),
+          ],
           const SizedBox(height: 10),
           Card2(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -231,4 +257,90 @@ class _Tile extends StatelessWidget {
           ],
         ),
       );
+}
+
+
+class _SmoothCard extends StatelessWidget {
+  final TripRecord r;
+  const _SmoothCard(this.r);
+
+  @override
+  Widget build(BuildContext context) {
+    final sc = r.smooth!;
+    final color = sc >= 80 ? C.accent : (sc >= 60 ? C.amber : C.red);
+    final word = sc >= 80 ? 'плавно' : (sc >= 60 ? 'средне' : 'резко');
+    final hw = r.hardWh;
+    return Card2(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Плавность', style: TextStyle(fontSize: 14, color: C.textSoft)),
+                const SizedBox(height: 3),
+                Text(
+                  'Резких стартов: ${r.hardStarts ?? 0}'
+                  '${hw != null && hw >= 1 ? ' · на рывки ушло ${hw.toStringAsFixed(0)} Вт·ч' : ''}',
+                  style: const TextStyle(fontSize: 12, color: C.muted),
+                ),
+              ],
+            ),
+          ),
+          Text('$sc', style: numStyle(22, color: color)),
+          const SizedBox(width: 6),
+          Text(word, style: TextStyle(fontSize: 12, color: color)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ModeSplit extends StatelessWidget {
+  final Map<String, int> modes;
+  const _ModeSplit(this.modes);
+
+  static const _names = {'1': 'ЭКО', '0': 'D', '2': 'S'};
+  static const _colors = {'1': C.accent, '0': C.textSoft, '2': C.amber};
+
+  @override
+  Widget build(BuildContext context) {
+    final total = modes.values.fold<int>(0, (a, b) => a + b);
+    if (total <= 0) return const SizedBox.shrink();
+    final keys = ['1', '0', '2'].where((k) => (modes[k] ?? 0) > 0).toList();
+    return Card2(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Режимы', style: TextStyle(fontSize: 14, color: C.textSoft)),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: Row(
+              children: [
+                for (final k in keys)
+                  Expanded(
+                    flex: modes[k]!,
+                    child: Container(height: 8, color: _colors[k]),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 14,
+            children: [
+              for (final k in keys)
+                Text(
+                  '${_names[k]} ${(modes[k]! * 100 / total).round()}% · ${(modes[k]! / 60).round()} мин',
+                  style: TextStyle(fontSize: 12, color: _colors[k]),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }

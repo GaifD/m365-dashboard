@@ -642,9 +642,11 @@ class ScooterService extends ChangeNotifier {
       final a = t.avgWhKm;
       if (a != null) parts.add('${a.toStringAsFixed(1)} Вт·ч/км');
     }
-    final r = b.rangeKm;
+    final r = b.usableRangeKm;
     if (r != null) parts.add('запас ~${r.toStringAsFixed(0)} км');
-    SystemBridge.updateService(title, parts.isEmpty ? (deviceName ?? 'Подключено') : parts.join(' · '));
+    final w = b.warnings;
+    final t2 = w.isNotEmpty && dataFlowing ? '⚠ $title' : title;
+    SystemBridge.updateService(t2, w.isNotEmpty ? w.first : (parts.isEmpty ? (deviceName ?? 'Подключено') : parts.join(' · ')));
   }
 
   // ---- опрос: строго запрос → ответ ----
@@ -863,11 +865,12 @@ class ScooterService extends ChangeNotifier {
         _detectSign(rawCurrent);
         current = rawCurrent * _currentSign;
         brain.onBms(voltage, current, remainingMah, bmsPct);
+        brain.onTemps(temp1 > temp2 ? temp1.toDouble() : temp2.toDouble(), frameTemp);
         break;
       case 0x40:
         final n = (d.length ~/ 2).clamp(0, 10);
         cells = [for (var i = 0; i < n; i++) u16(d, i * 2) / 1000.0].where((v) => v > 1).toList();
-        if (cells.isNotEmpty) brain.minCell = cells.reduce((a, b) => a < b ? a : b);
+        brain.onCells(cells);
         break;
       case 0x17:
         if (d.length >= 2) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../ble/scooter.dart';
 import '../data/models.dart';
+import '../logic/analytics.dart';
 import '../theme.dart';
 import 'trip_detail_screen.dart';
 import 'widgets.dart';
@@ -99,6 +100,8 @@ class TripsScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              const SizedBox(height: 10),
+              _AnalyticsSection(tripsCount: b.trips.length),
               const SizedBox(height: 4),
               if (b.trips.isEmpty)
                 const Padding(
@@ -172,6 +175,213 @@ class _TripTile extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+
+class _AnalyticsSection extends StatefulWidget {
+  final int tripsCount;
+  const _AnalyticsSection({required this.tripsCount});
+
+  @override
+  State<_AnalyticsSection> createState() => _AnalyticsSectionState();
+}
+
+class _AnalyticsSectionState extends State<_AnalyticsSection> {
+  SpeedTable? _table;
+  final _km = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(_AnalyticsSection old) {
+    super.didUpdateWidget(old);
+    if (old.tripsCount != widget.tripsCount) _load();
+  }
+
+  Future<void> _load() async {
+    final t = await ScooterService.instance.brain.speedTable();
+    if (mounted) setState(() => _table = t);
+  }
+
+  @override
+  void dispose() {
+    _km.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final b = ScooterService.instance.brain;
+    final t = _table;
+    return Column(
+      children: [
+        _rangeCard(b, t),
+        const SizedBox(height: 10),
+        if (t != null) _speedCard(t),
+      ],
+    );
+  }
+
+  Widget _rangeCard(dynamic b, SpeedTable? t) {
+    final km = double.tryParse(_km.text.replaceAll(',', '.'));
+    final usable = b.usableWh as double?;
+    final whKm = b.rangeWhKm as double;
+    String? title;
+    String? hint;
+    var ok = true;
+    if (km != null && km > 0 && usable != null) {
+      final reserve = usable * 0.92; // небольшой запас на ошибку оценки
+      final need = km * whKm;
+      if (need <= reserve) {
+        final spare = reserve / whKm - km;
+        title = 'Хватит, запас ~${spare.toStringAsFixed(0)} км';
+        hint = 'При твоём обычном расходе ${whKm.toStringAsFixed(1)} Вт·ч/км.';
+      } else {
+        ok = false;
+        final idx = t?.maxSpeedFor(km, reserve);
+        title = 'На обычном темпе не хватит';
+        if (idx == null) {
+          hint = 'Нужно ~${need.toStringAsFixed(0)} Вт·ч, доступно ~${reserve.toStringAsFixed(0)}.';
+        } else if (idx < 0) {
+          hint = 'Не хватит даже на малой скорости: нужно ~${need.toStringAsFixed(0)} Вт·ч, доступно ~${reserve.toStringAsFixed(0)}.';
+        } else {
+          final top = SpeedTable.edges[idx + 1];
+          hint = top >= 100
+              ? 'Хватит, если ехать в своём режиме без резких разгонов.'
+              : 'Держи не больше ${top.toStringAsFixed(0)} км/ч — тогда хватит.';
+          title = 'Хватит, если сбавить';
+          ok = true;
+        }
+      }
+    }
+    return Card2(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Хватит ли доехать?', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 110,
+                child: TextField(
+                  controller: _km,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (_) => setState(() {}),
+                  style: numStyle(22),
+                  decoration: const InputDecoration(
+                    labelText: 'Расстояние',
+                    suffixText: 'км',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: title == null
+                    ? const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text('Введи, сколько ехать. Учитывается заряд, слабая ячейка и твой расход.',
+                            style: TextStyle(fontSize: 12, color: C.muted, height: 1.4)),
+                      )
+                    : Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: (ok ? C.accent : C.amber).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(title,
+                                style: TextStyle(
+                                    fontSize: 14, fontWeight: FontWeight.w700, color: ok ? C.accent : C.amber)),
+                            if (hint != null) ...[
+                              const SizedBox(height: 3),
+                              Text(hint, style: const TextStyle(fontSize: 12, color: C.textSoft, height: 1.35)),
+                            ],
+                          ],
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _speedCard(SpeedTable t) {
+    final best = t.bestBin;
+    const modes = [('all', 'Все'), ('1', 'ЭКО'), ('0', 'D'), ('2', 'S')];
+    final hasModes = t.tripsWithMode > 0;
+    String cell(String k, int i) {
+      final v = t.cells[k]![i].whKm;
+      return v == null ? '—' : v.toStringAsFixed(1);
+    }
+
+    return Card2(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text('Расход по скоростям', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              ),
+              Text('Вт·ч/км · ${t.trips} поездок', style: const TextStyle(fontSize: 12, color: C.muted)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Table(
+            columnWidths: const {0: FlexColumnWidth(1.3)},
+            children: [
+              TableRow(children: [
+                const Text('км/ч', style: TextStyle(fontSize: 11, color: C.muted)),
+                for (final m in modes)
+                  if (m.$1 == 'all' || hasModes)
+                    Text(m.$2,
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(fontSize: 11, color: C.muted, fontWeight: FontWeight.w600)),
+              ]),
+              for (var i = 0; i < SpeedTable.labels.length; i++)
+                TableRow(children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Text(SpeedTable.labels[i],
+                        style: TextStyle(fontSize: 13, color: i == best ? C.accent : C.textSoft)),
+                  ),
+                  for (final m in modes)
+                    if (m.$1 == 'all' || hasModes)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Text(cell(m.$1, i),
+                            textAlign: TextAlign.right,
+                            style: numStyle(14,
+                                weight: FontWeight.w500,
+                                color: m.$1 == 'all' && i == best ? C.accent : C.text)),
+                      ),
+                ]),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            best == null
+                ? 'Нужно больше поездок, чтобы посчитать.'
+                : 'Экономнее всего — ${SpeedTable.labels[best]} км/ч.'
+                    '${hasModes ? '' : ' Разбивка по режимам появится после поездок на этой версии.'}',
+            style: const TextStyle(fontSize: 12, color: C.textSoft, height: 1.4),
+          ),
+        ],
       ),
     );
   }

@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/models.dart';
 import '../data/store.dart';
+import 'analytics.dart';
+import 'cells.dart';
 
 class _Slice {
   final double wh;
@@ -100,6 +102,7 @@ class Brain extends ChangeNotifier {
   static const Duration restAfter = Duration(minutes: 15);
   static const Duration tripEndIdle = Duration(minutes: 3);
   static const Duration resumeWindow = Duration(minutes: 10);
+  static const double minCapSpan = 40; // замер ёмкости — только по куску шкалы от 40%
 
   Store? _store;
   String? key;
@@ -112,6 +115,9 @@ class Brain extends ChangeNotifier {
   double get whPerPct => _whPerPctLearned ?? factoryWh / 100.0;
   double get kBms => _kLearned ?? 1.0;
   List<CapacitySample> capacity = [];
+  final WeakCellTracker cells = WeakCellTracker();
+  double batteryTemp = 0;
+  double controllerTemp = 0;
 
   // ---- история ----
   List<TripRecord> trips = [];
@@ -302,6 +308,19 @@ class Brain extends ChangeNotifier {
     _detectRestAndCharge(now);
   }
 
+  void onTemps(double battery, double controller) {
+    batteryTemp = battery;
+    controllerTemp = controller;
+  }
+
+  void onCells(List<double> c) {
+    if (c.isEmpty) return;
+    minCell = c.reduce(math.min);
+    final q = _quietSince;
+    final atRest = q != null && DateTime.now().difference(q) >= const Duration(minutes: 2);
+    cells.update(c, current, speed, atRest: atRest);
+  }
+
   void onFactoryMah(int v) {
     if (v > 1000) factoryMah = v;
   }
@@ -358,7 +377,79 @@ class Brain extends ChangeNotifier {
     return w / rangeWhKm;
   }
 
+  // ---- слабая ячейка ----
+  /// Ниже какого заряда слабая ячейка на сильном токе упирается в порог (если известно).
+  double? get weakCutoffPct => cells.cutoffPct();
+
+  /// Энергия, которую реально можно взять до отключения по слабой ячейке.
+  double? get usableWh {
+    final p = honestPct;
+    if (p == null) return null;
+    final cut = weakCutoffPct ?? 0;
+    return math.max(0, p - cut) * whPerPct;
+  }
+
+  double? get usableRangeKm {
+    final w = usableWh;
+    return w == null ? null : w / rangeWhKm;
+  }
+
+  /// Ограничивает ли слабая ячейка запас хода заметно (больше чем на 3% заряда).
+  bool get weakLimits => (weakCutoffPct ?? 0) > 3;
+
+  /// Активные предупреждения, самое важное первым.
+  List<String> get warnings {
+    final w = <String>[];
+    final wi = cells.weakIndex;
+    if (batteryTemp >= 50) w.add('Батарея горячая: ${batteryTemp.toStringAsFixed(0)}°. Дай ей остыть.');
+    if (controllerTemp >= 70) w.add('Контроллер горячий: ${controllerTemp.toStringAsFixed(0)}°.');
+    final mc = minCell;
+    if (mc != null && mc > 1 && speed > 3 && mc < WeakCellTracker.warnV) {
+      w.add('Ячейка ${wi != null ? wi + 1 : ''} просела до ${mc.toStringAsFixed(2)} В — разгоняйся плавнее, '
+          'иначе самокат может отключиться.');
+    }
+    final g = cells.restGap;
+    if (g != null && g >= 0.08) {
+      w.add('Сильный разбаланс в покое: ${g.toStringAsFixed(2)} В. Батарею стоит проверить.');
+    }
+    final p = honestPct;
+    final cut = weakCutoffPct ?? 0;
+    if (p != null && p - cut < 10 && connected) {
+      w.add('Заряда осталось мало${cut > 3 ? ' с учётом слабой ячейки' : ''}.');
+    }
+    return w;
+  }
+
   // ---- ёмкость ----
+  bool get capConfirmed {
+    if (capacity.length < 2) return false;
+    final v = capacity.map((c) => c.capWh).toList()..sort();
+    final m = _median(v);
+    return (v.last - v.first) / m < 0.08;
+  }
+
+  Future<void> resetCapacity() async {
+    capacity.clear();
+    _whPerPctLearned = null;
+    _kLearned = null;
+    capAnchor = null;
+    await _saveState();
+    notifyListeners();
+  }
+
+  /// Расход по скоростям и режимам по последним поездкам.
+  Future<SpeedTable> speedTable({int maxTrips = 60}) async {
+    final t = SpeedTable();
+    var n = 0;
+    for (final r in trips) {
+      if (!r.hasSamples || r.unrecorded) continue;
+      final s = await loadSamples(r);
+      t.addTrip(s, modeOk: r.modeOk);
+      if (++n >= maxTrips) break;
+    }
+    return t;
+  }
+
   double? get capWh => capacity.isEmpty ? null : _median(capacity.map((c) => c.capWh).toList());
   double? get capMahBms => capacity.isEmpty ? null : _median(capacity.map((c) => c.capMahBms).toList());
   double? get capAhApp => capacity.isEmpty ? null : _median(capacity.map((c) => c.capAhApp).toList());
@@ -478,7 +569,7 @@ class Brain extends ChangeNotifier {
       final wh = cumWh - c.cumWh;
       final ah = cumAh - c.cumAh;
       final dMah = (c.mah - mah).toDouble();
-      if (dPct.abs() >= 15 && wh * dPct > 0 && ah * dPct > 0) {
+      if (dPct.abs() >= minCapSpan && wh * dPct > 0 && ah * dPct > 0) {
         capacity.add(CapacitySample(
           t: now,
           dPct: dPct,
@@ -701,7 +792,7 @@ class Brain extends ChangeNotifier {
     }
   }
 
-  TripRecord _recordFrom(ActiveTrip t, {required DateTime end}) => TripRecord(
+  TripRecord _recordFrom(ActiveTrip t, {required DateTime end, Smoothness? sm}) => TripRecord(
         id: '${t.start.millisecondsSinceEpoch}',
         start: t.start,
         end: end,
@@ -721,6 +812,10 @@ class Brain extends ChangeNotifier {
         unrecorded: false,
         whApprox: false,
         hasSamples: true,
+        ver: 2,
+        smooth: sm?.score,
+        hardStarts: sm?.hardStarts,
+        hardWh: sm?.hardWh,
       );
 
   /// Завершить текущую поездку сейчас (кнопка).
@@ -736,7 +831,7 @@ class Brain extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    final rec = _recordFrom(t, end: t.lastMove);
+    final rec = _recordFrom(t, end: t.lastMove, sm: Smoothness.of(t.samples));
     trips.insert(0, rec);
     if (s != null) {
       s.writeJson('trips/${rec.id}.json', t.samples);
@@ -806,6 +901,9 @@ class Brain extends ChangeNotifier {
       capAnchor = Snapshot.fromJson(st['capAnchor']);
       final cap = st['capacity'];
       capacity = cap is List ? cap.map(CapacitySample.fromJson).whereType<CapacitySample>().toList() : [];
+      // Замеры по короткому куску шкалы ненадёжны (проценты BMS неравномерны) — отбрасываем.
+      capacity.removeWhere((c) => c.dPct.abs() < minCapSpan);
+      cells.loadJson(st['cells']);
       if (st['factoryMah'] is num) factoryMah = (st['factoryMah'] as num).toInt();
       liveCharge = LiveCharge.fromJson(st['liveCharge']);
       _relearn();
@@ -852,6 +950,7 @@ class Brain extends ChangeNotifier {
       'capacity': capacity.map((c) => c.toJson()).toList(),
       'factoryMah': factoryMah,
       'liveCharge': liveCharge?.toJson(),
+      'cells': cells.toJson(),
     });
   }
 

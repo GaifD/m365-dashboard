@@ -144,6 +144,8 @@ class BatteryScreen extends StatelessWidget {
               ],
               const SizedBox(height: 10),
               _CapacityCard(b: b),
+              const SizedBox(height: 10),
+              _WeakCellCard(b: b),
               const SectionTitle('Зарядки'),
               _ChargesCard(b: b, onTariff: () => editTariff(context)),
             ],
@@ -215,6 +217,11 @@ class _CapacityCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final wh = b.capWh;
     final n = b.capacity.length;
+    final status = n == 0
+        ? 'нет замеров'
+        : b.capConfirmed
+            ? 'подтверждено · $n замер${n < 5 ? 'а' : 'ов'}'
+            : 'предварительно · $n замер${n == 1 ? '' : n < 5 ? 'а' : 'ов'}';
     return Card2(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -224,16 +231,16 @@ class _CapacityCard extends StatelessWidget {
               const Expanded(
                 child: Text('Реальная ёмкость', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
               ),
-              Text(n == 0 ? 'нет замеров' : 'уточняется · $n замер${n == 1 ? '' : n < 5 ? 'а' : 'ов'}',
-                  style: const TextStyle(fontSize: 12, color: C.muted)),
+              Text(status, style: const TextStyle(fontSize: 12, color: C.muted)),
             ],
           ),
           const SizedBox(height: 10),
           if (wh == null)
             const Text(
-              'Замер появится сам, когда заряд за поездки упадёт хотя бы на 15%, '
-              'а самокат потом постоит 15+ минут (или до следующего подключения). '
-              'Зарядка между этими моментами сбрасывает замер.',
+              'Проценты BMS неравномерны, поэтому замер берётся только по большому куску шкалы — '
+              'от 40%. Например: зарядился до 100% и постоял → откатал до ~55% и ниже '
+              '(можно за несколько поездок, без зарядок между ними) → самокат постоял 15+ минут. '
+              'Или зарядка с низкого заряда до полного с телефоном рядом.',
               style: TextStyle(fontSize: 12, color: C.textSoft, height: 1.45),
             )
           else ...[
@@ -249,12 +256,93 @@ class _CapacityCard extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'По счётчику приложения: ~${(b.capAhApp! * 1000).toStringAsFixed(0)} мАч\n'
-              'По счётчику BMS: ~${b.capMahBms!.toStringAsFixed(0)} мАч\n'
-              'Заводская: ${b.factoryMah} мАч (~${b.factoryWh.toStringAsFixed(0)} Вт·ч)',
+              'Замеры: ${b.capacity.map((c) => '${c.capWh.toStringAsFixed(0)} (${c.dPct.abs().toStringAsFixed(0)}%)').join(', ')}\n'
+              'По счётчику BMS: ~${b.capMahBms!.toStringAsFixed(0)} мАч · '
+              'заводская ${b.factoryMah} мАч (~${b.factoryWh.toStringAsFixed(0)} Вт·ч)',
               style: const TextStyle(fontSize: 12, color: C.textSoft, height: 1.5),
             ),
           ],
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => _confirmReset(context),
+              child: const Text('Сбросить замеры'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmReset(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: C.surface,
+        title: const Text('Сбросить замеры ёмкости?'),
+        content: const Text('Приложение вернётся к заводской ёмкости и начнёт замер заново.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          TextButton(
+            onPressed: () {
+              b.resetCapacity();
+              Navigator.pop(ctx);
+            },
+            child: const Text('Сбросить'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WeakCellCard extends StatelessWidget {
+  final Brain b;
+  const _WeakCellCard({required this.b});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = b.cells;
+    final wi = c.weakIndex;
+    final rw = c.rWeakOhm;
+    final ro = c.rOthersOhm;
+    final ip = c.peakCurrent;
+    final cut = b.weakCutoffPct;
+    final lines = <String>[];
+    if (wi == null) {
+      lines.add('Собираю данные: нужна пара поездок, чтобы уверенно понять, какая ячейка слабее остальных.');
+    } else {
+      if (c.restGap != null) {
+        lines.add('В покое ниже остальных на ${c.restGap!.toStringAsFixed(3)} В.');
+      }
+      if (rw != null) {
+        final ratio = (ro != null && ro > 0) ? ' — в ${(rw / ro).toStringAsFixed(1)}× выше остальных' : '';
+        lines.add('Сопротивление ~${(rw * 1000).toStringAsFixed(0)} мОм$ratio.');
+      } else {
+        lines.add('Сопротивление: мало данных о разгонах.');
+      }
+      if (cut != null && ip != null) {
+        lines.add(cut > 3
+            ? 'На сильном токе (~${ip.toStringAsFixed(0)} А) начнёт упираться в порог при заряде ниже ~${cut.toStringAsFixed(0)}%. '
+                'Запас хода считается с учётом этого.'
+            : 'На твоём обычном токе (~${ip.toStringAsFixed(0)} А) запас хода не ограничивает.');
+      }
+    }
+    return Card2(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text('Слабая ячейка', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              ),
+              Text(wi == null ? 'определяется' : '№${wi + 1}',
+                  style: wi == null ? const TextStyle(fontSize: 12, color: C.muted) : numStyle(18, color: C.amber)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(lines.join('\n'), style: const TextStyle(fontSize: 12, color: C.textSoft, height: 1.5)),
         ],
       ),
     );

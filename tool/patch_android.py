@@ -47,6 +47,17 @@ for f in pathlib.Path("tool/android").glob("*.kt"):
     print("copied", f.name)
 assert "MainActivity.kt" in copied and "RideService.kt" in copied, f"native files missing: {copied}"
 
+# своя иконка
+res_src = pathlib.Path("tool/android/res")
+icons = 0
+for f in res_src.glob("mipmap-*/ic_launcher.png"):
+    dst = pathlib.Path("android/app/src/main/res") / f.parent.name / f.name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(f, dst)
+    icons += 1
+assert icons == 5, f"icons copied: {icons}"
+print("icons copied:", icons)
+
 
 # Старые плагины (flutter_blue_plus) компилируются под android-33, а свежие androidx
 # требуют 34+. Поднимаем compileSdk у всех библиотек-плагинов.

@@ -20,8 +20,10 @@ class RideScreen extends StatelessWidget {
         final connected = s.link == LinkState.connected;
         final trip = b.trip;
         final inst = b.instantWhKm;
-        final range = b.rangeKm;
+        final range = b.usableRangeKm;
         final remWh = b.remainingWh;
+        final warns = s.dataFlowing ? b.warnings : const <String>[];
+        final wi = b.cells.weakIndex;
         return SafeArea(
           child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -68,6 +70,10 @@ class RideScreen extends StatelessWidget {
                     icon: Icons.battery_alert,
                   ),
                 ),
+              ],
+              for (final w in warns.take(2)) ...[
+                const SizedBox(height: 8),
+                Banner2(text: w, color: C.amber),
               ],
               const SizedBox(height: 6),
               Center(
@@ -116,12 +122,14 @@ class RideScreen extends StatelessWidget {
                   StatTile(
                     label: 'Остаток энергии',
                     value: remWh == null ? '—' : remWh.toStringAsFixed(0),
-                    unit: 'Вт·ч из ~${(b.whPerPct * 100).toStringAsFixed(0)}',
+                    unit: 'Вт·ч из ~${(b.whPerPct * 100).toStringAsFixed(0)}${b.capacity.isEmpty ? ' (завод.)' : ''}',
                   ),
                   StatTile(
                     label: 'Запас хода',
                     value: range == null ? '—' : '~${range.toStringAsFixed(0)}',
-                    unit: 'км при ${b.rangeWhKm.toStringAsFixed(1)} Вт·ч/км',
+                    unit: b.weakLimits && wi != null
+                        ? 'км · до просадки ячейки ${wi + 1}'
+                        : 'км при ${b.rangeWhKm.toStringAsFixed(1)} Вт·ч/км',
                   ),
                 ],
               ),
